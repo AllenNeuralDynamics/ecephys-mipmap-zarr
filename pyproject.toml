@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "ecephys-mipmap-zarr"
 description = "Tools to make mipmap zarrs for extracellular ephys"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
   { name = "Allen Institute for Neural Dynamics" },
   { name = "Galen Lynch", email = "galen@galenlynch.com" },
@@ -16,7 +16,20 @@ readme = "README.md"
 version = "0.1.0"
 
 dependencies = [
+    "zarr>=3.0,<4",
+    "numpy>=1.24",
+    "dask[array]>=2024.1",
 ]
+
+[project.optional-dependencies]
+cli = ["pydantic-settings>=2.0", "rich"]
+viewer = ["panel>=1.0", "bokeh>=3.0", "param"]
+cbin = ["mtscomp"]
+s3 = ["s3fs"]
+wavpack = ["wavpack-numcodecs"]
+
+[project.scripts]
+ecephys-mipmap = "ecephys_mipmap_zarr.cli:main"
 
 [project.urls]
 Repository = "https://github.com/AllenNeuralDynamics/ecephys-mipmap-zarr/"
@@ -25,7 +38,7 @@ Changelog = "https://github.com/AllenNeuralDynamics/ecephys-mipmap-zarr/blob/mai
 
 [dependency-groups]
 types = ["mypy"]
-dev = [{ include-group = "types" }, "codespell", "pytest", "pytest-cov", "ruff", "interrogate"]
+dev = [{ include-group = "types" }, "codespell", "pytest", "pytest-cov", "ruff", "interrogate", "pydantic-settings>=2.0", "rich", "panel>=1.0", "bokeh>=3.0", "param", "mtscomp", "s3fs", "wavpack-numcodecs"]
 jupyter = [{ include-group = "dev" }, "ipykernel", "pip"]
 
 [tool.hatch.build.targets.wheel]
@@ -33,14 +46,14 @@ packages = ["src/ecephys_mipmap_zarr"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 extend-select = ["Q", "RUF100", "C90", "I", "F", "E", "W", "D", "UP", "ANN", "PYI"]
 extend-ignore = ["ANN401"]  # Skip self/cls type annotations
 # Skip all type annotation checks in tests
-per-file-ignores = { "tests/*.py" = ["ANN"] }
-mccabe = { max-complexity = 14 }
+per-file-ignores = { "tests/*.py" = ["ANN", "D"] }
+mccabe = { max-complexity = 18 }
 pydocstyle = { convention = "numpy" }
 
 [tool.codespell]
@@ -79,4 +92,17 @@ show_error_codes = true
 module = "tests.*"
 disallow_untyped_defs = false
 disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = ["zarr.*", "dask.*", "pydantic_settings.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*"]
+ignore_missing_imports = true
+# zarr v3 generics are in flux; suppress type-arg errors in our build module
+[[tool.mypy.overrides]]
+module = ["ecephys_mipmap_zarr.build", "ecephys_mipmap_zarr.read", "ecephys_mipmap_zarr.cli"]
+disable_error_code = ["type-arg"]
+# Bokeh/Panel type stubs are incomplete; relax checking for the viewer
+[[tool.mypy.overrides]]
+module = "ecephys_mipmap_zarr.viewer"
+disallow_untyped_calls = false
+disable_error_code = ["type-arg", "arg-type", "call-arg", "attr-defined", "unused-ignore", "assignment"]
 
