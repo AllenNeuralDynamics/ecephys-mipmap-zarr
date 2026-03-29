@@ -30,6 +30,7 @@ import numpy as np
 import numpy.typing as npt
 import zarr
 
+from ecephys_mipmap_zarr._store import _open_store
 from ecephys_mipmap_zarr.metadata import (
     LevelQuantization,
     MipmapAttrs,
@@ -356,31 +357,3 @@ def open_mipmap(store_path: str | Path) -> MipmapStore:
         raw_group = _open_store(attrs.raw_source, mode="r")
 
     return MipmapStore(root, attrs, raw_group=raw_group)
-
-
-def _open_store(path: str | Path, mode: str = "r") -> zarr.Group:
-    """Open a zarr store from a local path or remote URI.
-
-    Parameters
-    ----------
-    path : str or Path
-        Local path or remote URI (e.g. ``s3://bucket/store.zarr``).
-    mode : str, optional
-        Open mode, by default ``"r"``.
-
-    Returns
-    -------
-    zarr.Group
-    """
-    path_str = str(path)
-    if "://" in path_str:
-        try:
-            import fsspec
-        except ImportError as e:
-            msg = "fsspec is required for remote URIs: pip install ecephys-mipmap-zarr[s3]"
-            raise ImportError(msg) from e
-        protocol = path_str.split("://")[0]
-        fs = fsspec.filesystem(protocol, anon=True)
-        store = zarr.storage.FsspecStore(fs=fs, path=path_str.replace(f"{protocol}://", ""))
-        return zarr.open_group(store, mode=mode, use_consolidated=None)  # type: ignore[arg-type]
-    return zarr.open_group(path_str, mode=mode, use_consolidated=None)  # type: ignore[arg-type]

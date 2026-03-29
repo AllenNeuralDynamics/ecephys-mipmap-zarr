@@ -148,7 +148,7 @@ class BuildSettings(BaseSettings):
         input_path = Path(self.input)
 
         if _is_zarr_store(self.input):
-            from ecephys_mipmap_zarr.build import _open_store
+            from ecephys_mipmap_zarr._store import _open_store
 
             console.print(f"Reading zarr store: {self.input}")
             root = _open_store(self.input, mode="r")

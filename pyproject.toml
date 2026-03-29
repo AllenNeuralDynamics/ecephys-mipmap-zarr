@@ -98,7 +98,7 @@ module = ["zarr.*", "dask.*", "pydantic_settings.*", "rich.*", "panel.*", "bokeh
 ignore_missing_imports = true
 # zarr v3 generics are in flux; suppress type-arg errors in our build module
 [[tool.mypy.overrides]]
-module = ["ecephys_mipmap_zarr.build", "ecephys_mipmap_zarr.read", "ecephys_mipmap_zarr.cli"]
+module = ["ecephys_mipmap_zarr.build", "ecephys_mipmap_zarr.read", "ecephys_mipmap_zarr.cli", "ecephys_mipmap_zarr._store", "ecephys_mipmap_zarr._engine"]
 disable_error_code = ["type-arg"]
 # Bokeh/Panel type stubs are incomplete; relax checking for the viewer
 [[tool.mypy.overrides]]
