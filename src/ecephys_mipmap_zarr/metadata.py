@@ -174,6 +174,9 @@ class BuildConfig:
         Right-shift for pyramid data.
     noise_floor : float or None
         Explicit noise floor override (ADC RMS).
+    clip_outliers : bool
+        When LSB-shifting, clip rare outliers (<0.01% of samples) to fit
+        int8 range. Disabled keeps int16 when any value exceeds [-128, 127].
     """
 
     chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG
@@ -185,6 +188,7 @@ class BuildConfig:
     lsb_shift_raw: int | str = "auto"
     lsb_shift_pyramid: int | str = "auto"
     noise_floor: float | None = None
+    clip_outliers: bool = True
 
 
 DEFAULT_BUILD_CONFIG: BuildConfig = BuildConfig()

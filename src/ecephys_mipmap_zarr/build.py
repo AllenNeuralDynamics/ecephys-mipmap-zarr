@@ -10,6 +10,7 @@ This module provides two entry points:
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,12 +28,14 @@ from ecephys_mipmap_zarr._engine import (  # noqa: F401 — re-exported for back
     _build_finest_from_raw,
     _build_non_quantized,
     _cascade_minmax,
+    _clip_and_convert_to_int8,
     _compute_minmax_block,
     _convert_array_to_int8,
     _create_zarr_array,
     _quantize_raw_in_place,
     _resolve_compressor,
     _resolve_lsb_shift,
+    _ShiftStats,
     _write_raw_and_compute_finest,
 )
 from ecephys_mipmap_zarr._store import (
@@ -65,6 +68,8 @@ __all__ = [
     "build_mipmap",
     "ensure_pyramid",
 ]
+
+_log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +190,7 @@ def build_mipmap(
             compressor=compressor,
         )
 
-        s32_blocks = _write_raw_and_compute_finest(
+        s32_blocks_result = _write_raw_and_compute_finest(
             source,
             raw_array,
             None,
@@ -196,8 +201,9 @@ def build_mipmap(
             stats=stats,
             progress=progress,
         )
+        assert isinstance(s32_blocks_result, list)  # no shift in quantized path
 
-        all_s32 = np.concatenate(s32_blocks, axis=2)
+        all_s32 = np.concatenate(s32_blocks_result, axis=2)
 
         if do_quantize_pyramids:
             # Compute level quantization from s32 stats
@@ -318,6 +324,7 @@ def build_mipmap(
             lsb_shift_pyramid=lsb_shift_pyramid,
             noise_floor=noise_floor,
             progress=progress,
+            clip_outliers=config.clip_outliers,
         )
 
     # Copy source metadata if requested
@@ -583,8 +590,14 @@ def add_pyramid(
                 pyr_arr: zarr.Array = out_root[minmax_path(s).lstrip("/")]  # type: ignore[assignment]
                 pyr_arr.attrs.update({"lsb_shift": pyr_shift, "original_dtype": raw_dtype})
 
-            # Convert to int8 if range fits
-            if pyr_s_min >= -128 and pyr_s_max <= 127:
+            # Convert to int8 if range fits, or clip rare outliers
+            clip_outliers = config.clip_outliers
+            CLIP_THRESHOLD = 0.0001  # 0.01%
+            fits_int8 = pyr_s_min >= -128 and pyr_s_max <= 127
+            pyr_outliers = int(((shifted_s32 < -128) | (shifted_s32 > 127)).sum())
+            pyr_total = shifted_s32.size
+
+            if fits_int8:
                 for s in strides:
                     _convert_array_to_int8(
                         out_root,
@@ -595,6 +608,28 @@ def add_pyramid(
                         entropy=pyr_entropy,
                         is_pyramid=True,
                     )
+            elif clip_outliers and pyr_total > 0 and pyr_outliers / pyr_total < CLIP_THRESHOLD:
+                _log.info(
+                    "Clipping %d pyramid outlier samples (%.6f%%) to fit int8",
+                    pyr_outliers,
+                    100 * pyr_outliers / pyr_total,
+                )
+                for s in strides:
+                    _clip_and_convert_to_int8(
+                        out_root,
+                        minmax_path(s).lstrip("/"),
+                        cfg.minmax_chunk,
+                        cfg.minmax_shard,
+                        compressor,
+                        entropy=pyr_entropy,
+                        is_pyramid=True,
+                    )
+            else:
+                _log.info(
+                    "Keeping int16 for pyramids: %d samples (%.4f%%) exceed int8 range",
+                    pyr_outliers,
+                    100 * pyr_outliers / max(pyr_total, 1),
+                )
         else:
             # No shift — direct write path
             finest_array = _create_zarr_array(

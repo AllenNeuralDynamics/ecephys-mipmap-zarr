@@ -989,3 +989,46 @@ class TestBuildMipmapLsbShift:
         pyr_root = zarr.open_group(str(out), mode="r", use_consolidated=None)
         s32 = pyr_root["minmax/s32"]
         assert dict(s32.attrs)["lsb_shift"] == 4
+
+    def test_clip_outliers_converts_to_int8(self, tmp_path):
+        """With rare outliers and clip_outliers=True, store is int8."""
+        rng = np.random.default_rng(42)
+        n_samples, n_channels = 100_000, 4
+        source = rng.integers(-400, 400, size=(n_samples, n_channels), dtype=np.int16)
+        # Add a few extreme outliers (well under 0.01% of 400_000 total samples)
+        source[50000, 0] = 10000
+        source[50001, 0] = -10000
+        out = tmp_path / "test.zarr"
+        cfg = self._small_chunk_config()
+
+        build_mipmap(
+            source,
+            out,
+            sampling_frequency=30000.0,
+            units="uV",
+            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4, clip_outliers=True),
+        )
+
+        root = zarr.open_group(str(out), mode="r", use_consolidated=None)
+        assert root["raw"].dtype == np.int8  # clipped to fit
+
+    def test_no_clip_keeps_int16(self, tmp_path):
+        """With outliers and clip_outliers=False, store stays int16."""
+        rng = np.random.default_rng(42)
+        n_samples, n_channels = 100_000, 4
+        source = rng.integers(-400, 400, size=(n_samples, n_channels), dtype=np.int16)
+        source[50000, 0] = 10000
+        source[50001, 0] = -10000
+        out = tmp_path / "test.zarr"
+        cfg = self._small_chunk_config()
+
+        build_mipmap(
+            source,
+            out,
+            sampling_frequency=30000.0,
+            units="uV",
+            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4, clip_outliers=False),
+        )
+
+        root = zarr.open_group(str(out), mode="r", use_consolidated=None)
+        assert root["raw"].dtype == np.int16  # kept int16

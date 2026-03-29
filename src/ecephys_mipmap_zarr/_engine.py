@@ -7,6 +7,7 @@ build API.  Not part of the public API.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -29,6 +30,8 @@ from ecephys_mipmap_zarr.metadata import (
 )
 
 __all__: list[str] = []  # private module
+
+log = logging.getLogger(__name__)
 
 
 def _resolve_lsb_shift(
@@ -105,6 +108,59 @@ def _convert_array_to_int8(
     """
     old_arr: zarr.Array = root[path]  # type: ignore[assignment]
     data = np.asarray(old_arr[:]).astype(np.int8)
+    shape = old_arr.shape
+    old_attrs = dict(old_arr.attrs)
+
+    del root[path]
+    new_arr = _create_zarr_array(
+        root,
+        path,
+        shape=shape,
+        dtype="int8",
+        chunks=chunks,
+        shards=shards,
+        compressor=compressor,
+        entropy=entropy,
+        is_pyramid=is_pyramid,
+    )
+    new_arr[:] = data
+    if old_attrs:
+        new_arr.attrs.update(old_attrs)
+
+
+def _clip_and_convert_to_int8(
+    root: zarr.Group,
+    path: str,
+    chunks: tuple[int, ...],
+    shards: tuple[int, ...],
+    compressor: str | BytesBytesCodec,
+    entropy: float | None = None,
+    is_pyramid: bool = False,
+) -> None:
+    """Clip int16 zarr array values to [-128, 127] and convert to int8 in-place.
+
+    Same as :func:`_convert_array_to_int8` but clips outlier values before
+    casting instead of assuming the data already fits.
+
+    Parameters
+    ----------
+    root : zarr.Group
+        Store root group.
+    path : str
+        Array path within root.
+    chunks : tuple
+        Chunk shape for the new array.
+    shards : tuple
+        Shard shape for the new array.
+    compressor : str or Codec
+        Compressor for the new array.
+    entropy : float or None, optional
+        Shannon entropy for shuffle auto-selection.
+    is_pyramid : bool, optional
+        Whether this is a pyramid array.
+    """
+    old_arr: zarr.Array = root[path]  # type: ignore[assignment]
+    data = np.clip(np.asarray(old_arr[:]), -128, 127).astype(np.int8)
     shape = old_arr.shape
     old_attrs = dict(old_arr.attrs)
 
@@ -369,6 +425,20 @@ class _AccumulatedStats:
         np.maximum(self.mm_max_max, maxs.max(axis=1), out=self.mm_max_max)
 
 
+@dataclass
+class _ShiftStats:
+    """Statistics from an LSB-shifted write pass."""
+
+    raw_min: int = 0
+    raw_max: int = 0
+    pyr_min: int = 0
+    pyr_max: int = 0
+    raw_outliers: int = 0
+    pyr_outliers: int = 0
+    raw_total: int = 0
+    pyr_total: int = 0
+
+
 ProgressCallback = Callable[[int, int], None]
 """Type for progress callbacks: ``(samples_processed, total_samples)``."""
 
@@ -386,7 +456,7 @@ def _write_raw_and_compute_finest(
     progress: ProgressCallback | None = None,
     lsb_shift_raw: int = 0,
     lsb_shift_pyramid: int = 0,
-) -> list[npt.NDArray[Any]] | tuple[int, int, int, int]:
+) -> list[npt.NDArray[Any]] | _ShiftStats:
     """Write raw data and simultaneously compute the finest pyramid level.
 
     Iterates over *source* in shard-aligned chunks.  For each chunk,
@@ -426,16 +496,20 @@ def _write_raw_and_compute_finest(
 
     Returns
     -------
-    list[np.ndarray] or tuple[int, int, int, int]
+    list[np.ndarray] or _ShiftStats
         Without LSB shift: list of min/max block arrays (empty if
-        *finest_array* was provided). With LSB shift: ``(raw_shifted_min,
-        raw_shifted_max, pyr_shifted_min, pyr_shifted_max)`` globals.
+        *finest_array* was provided). With LSB shift: :class:`_ShiftStats`
+        with global min/max and outlier counts.
     """
     collected: list[npt.NDArray[Any]] = []
     raw_s_min = np.iinfo(np.int16).max
     raw_s_max = np.iinfo(np.int16).min
     pyr_s_min = np.iinfo(np.int16).max
     pyr_s_max = np.iinfo(np.int16).min
+    raw_outliers = 0
+    pyr_outliers = 0
+    raw_total = 0
+    pyr_total = 0
 
     for t0 in range(0, n_samples, shard_samples):
         t1 = min(t0 + shard_samples, n_samples)
@@ -449,6 +523,8 @@ def _write_raw_and_compute_finest(
             raw_chunk = (chunk >> lsb_shift_raw).astype(np.int16)
             raw_s_min = min(raw_s_min, int(raw_chunk.min()))
             raw_s_max = max(raw_s_max, int(raw_chunk.max()))
+            raw_outliers += int(((raw_chunk < -128) | (raw_chunk > 127)).sum())
+            raw_total += raw_chunk.size
         else:
             raw_chunk = chunk
 
@@ -456,6 +532,8 @@ def _write_raw_and_compute_finest(
             mm_shifted = (mm >> lsb_shift_pyramid).astype(np.int16)
             pyr_s_min = min(pyr_s_min, int(mm_shifted.min()))
             pyr_s_max = max(pyr_s_max, int(mm_shifted.max()))
+            pyr_outliers += int(((mm_shifted < -128) | (mm_shifted > 127)).sum())
+            pyr_total += mm_shifted.size
         else:
             mm_shifted = mm
 
@@ -479,7 +557,16 @@ def _write_raw_and_compute_finest(
             progress(t1, n_samples)
 
     if lsb_shift_raw > 0 or lsb_shift_pyramid > 0:
-        return (raw_s_min, raw_s_max, pyr_s_min, pyr_s_max)
+        return _ShiftStats(
+            raw_min=raw_s_min,
+            raw_max=raw_s_max,
+            pyr_min=pyr_s_min,
+            pyr_max=pyr_s_max,
+            raw_outliers=raw_outliers,
+            pyr_outliers=pyr_outliers,
+            raw_total=raw_total,
+            pyr_total=pyr_total,
+        )
     return collected
 
 
@@ -713,6 +800,7 @@ def _build_non_quantized(
     lsb_shift_pyramid: int | str,
     noise_floor: float | None,
     progress: ProgressCallback | None,
+    clip_outliers: bool = True,
 ) -> int:
     """Build raw + pyramid arrays with optional LSB shift.
 
@@ -797,28 +885,78 @@ def _build_non_quantized(
             pyr_arr: zarr.Array = root[minmax_path(s).lstrip("/")]  # type: ignore[assignment]
             pyr_arr.attrs.update({"lsb_shift": pyr_shift, "original_dtype": dtype})
 
-    # Convert to int8 if range fits
-    if isinstance(result, tuple):
-        raw_shifted_min, raw_shifted_max, pyr_shifted_min, pyr_shifted_max = result
-        if raw_shift > 0 and raw_shifted_min >= -128 and raw_shifted_max <= 127:
-            _convert_array_to_int8(
-                root,
-                "raw",
-                cfg.raw_chunk,
-                cfg.raw_shard,
-                compressor,
-                entropy=raw_entropy,
-            )
-        if pyr_shift > 0 and pyr_shifted_min >= -128 and pyr_shifted_max <= 127:
-            for s in strides:
+    # Convert to int8 if range fits, or clip rare outliers
+    CLIP_THRESHOLD = 0.0001  # 0.01%
+
+    if isinstance(result, _ShiftStats):
+        # Raw array
+        if raw_shift > 0:
+            fits_int8 = result.raw_min >= -128 and result.raw_max <= 127
+            if fits_int8:
                 _convert_array_to_int8(
                     root,
-                    minmax_path(s).lstrip("/"),
-                    cfg.minmax_chunk,
-                    cfg.minmax_shard,
+                    "raw",
+                    cfg.raw_chunk,
+                    cfg.raw_shard,
                     compressor,
-                    entropy=pyr_entropy,
-                    is_pyramid=True,
+                    entropy=raw_entropy,
+                )
+            elif clip_outliers and result.raw_total > 0 and result.raw_outliers / result.raw_total < CLIP_THRESHOLD:
+                log.info(
+                    "Clipping %d raw outlier samples (%.6f%%) to fit int8",
+                    result.raw_outliers,
+                    100 * result.raw_outliers / result.raw_total,
+                )
+                _clip_and_convert_to_int8(
+                    root,
+                    "raw",
+                    cfg.raw_chunk,
+                    cfg.raw_shard,
+                    compressor,
+                    entropy=raw_entropy,
+                )
+            else:
+                log.info(
+                    "Keeping int16 for raw: %d samples (%.4f%%) exceed int8 range",
+                    result.raw_outliers,
+                    100 * result.raw_outliers / max(result.raw_total, 1),
+                )
+
+        # Pyramid arrays
+        if pyr_shift > 0:
+            fits_int8 = result.pyr_min >= -128 and result.pyr_max <= 127
+            if fits_int8:
+                for s in strides:
+                    _convert_array_to_int8(
+                        root,
+                        minmax_path(s).lstrip("/"),
+                        cfg.minmax_chunk,
+                        cfg.minmax_shard,
+                        compressor,
+                        entropy=pyr_entropy,
+                        is_pyramid=True,
+                    )
+            elif clip_outliers and result.pyr_total > 0 and result.pyr_outliers / result.pyr_total < CLIP_THRESHOLD:
+                log.info(
+                    "Clipping %d pyramid outlier samples (%.6f%%) to fit int8",
+                    result.pyr_outliers,
+                    100 * result.pyr_outliers / result.pyr_total,
+                )
+                for s in strides:
+                    _clip_and_convert_to_int8(
+                        root,
+                        minmax_path(s).lstrip("/"),
+                        cfg.minmax_chunk,
+                        cfg.minmax_shard,
+                        compressor,
+                        entropy=pyr_entropy,
+                        is_pyramid=True,
+                    )
+            else:
+                log.info(
+                    "Keeping int16 for pyramids: %d samples (%.4f%%) exceed int8 range",
+                    result.pyr_outliers,
+                    100 * result.pyr_outliers / max(result.pyr_total, 1),
                 )
 
     return raw_shift

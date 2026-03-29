@@ -142,6 +142,7 @@ class BuildSettings(BaseSettings):
         default=None,
         description="Explicit noise floor in ADC RMS units (overrides auto-detection)",
     )
+    clip_outliers: bool = Field(default=True, description="Clip rare outliers (<0.01%) to fit int8 when LSB-shifting")
 
     def cli_cmd(self) -> None:
         """Run the build command."""
@@ -191,6 +192,7 @@ class BuildSettings(BaseSettings):
             lsb_shift_raw=self.lsb_shift_raw,
             lsb_shift_pyramid=self.lsb_shift_pyramid,
             noise_floor=self.noise_floor,
+            clip_outliers=self.clip_outliers,
         )
         quant_config = QuantizationConfig(
             quantize=self.quantize,
@@ -231,6 +233,7 @@ class AddPyramidSettings(BaseSettings):
         default=None,
         description="Explicit noise floor in ADC RMS units (overrides auto-detection)",
     )
+    clip_outliers: bool = Field(default=True, description="Clip rare outliers (<0.01%) to fit int8 when LSB-shifting")
 
     def cli_cmd(self) -> None:
         """Run the add-pyramid command."""
@@ -240,6 +243,7 @@ class AddPyramidSettings(BaseSettings):
             compressor=self.compressor,
             lsb_shift_pyramid=self.lsb_shift_pyramid,
             noise_floor=self.noise_floor,
+            clip_outliers=self.clip_outliers,
         )
         quant_config = QuantizationConfig(
             quantize=self.quantize,
