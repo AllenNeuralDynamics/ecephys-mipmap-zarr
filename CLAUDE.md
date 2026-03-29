@@ -153,9 +153,13 @@ Without LSB shift (int16), baseline benchmarks on (C,T) layout:
 
 ```
 src/ecephys_mipmap_zarr/
-    build.py      # pyramid builder (dask-based: reshape into blocks, min/max along block axis)
-    read.py       # get_window and pyramid-level selection logic
-    metadata.py   # schema for root attrs, stride computation, layout constants
+    metadata.py   # schema, constants, config dataclasses (BuildConfig, QuantizationConfig), pure math
+    _store.py     # shared store utilities: _open_store, _find_raw_array, metadata copying
+    _engine.py    # write engine: minmax computation, cascade, zarr array factory, LSB shift
+    build.py      # public API: build_mipmap, add_pyramid, ensure_pyramid (orchestration only)
+    read.py       # get_window, MipmapStore, pyramid-level selection
+    cli.py        # CLI subcommands (build, add-pyramid, info, view)
+    viewer.py     # Panel+Bokeh interactive trace viewer with spike overlay
 ```
 
 ## Commands
