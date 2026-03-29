@@ -177,6 +177,10 @@ class BuildConfig:
     clip_outliers : bool
         When LSB-shifting, clip rare outliers (<0.01% of samples) to fit
         int8 range. Disabled keeps int16 when any value exceeds [-128, 127].
+    prefetch_chunks : int
+        Number of source chunks to prefetch in background threads.
+        ``0`` (default) disables prefetch. Set to 2-3 for S3 or WavPack
+        sources where read latency is high.
     """
 
     chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG
@@ -189,6 +193,7 @@ class BuildConfig:
     lsb_shift_pyramid: int | str = "auto"
     noise_floor: float | None = None
     clip_outliers: bool = True
+    prefetch_chunks: int = 0
 
 
 DEFAULT_BUILD_CONFIG: BuildConfig = BuildConfig()

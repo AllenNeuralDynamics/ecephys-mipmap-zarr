@@ -333,6 +333,37 @@ class TestBuildMipmap:
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
         np.testing.assert_array_equal(np.asarray(root["raw"][:]), np_source.T)
 
+    def test_prefetch_matches_sequential(self, tmp_path):
+        """Build with prefetch produces same output as without."""
+        rng = np.random.default_rng(42)
+        n_samples, n_channels = 100_000, 4
+        source = rng.integers(-500, 500, size=(n_samples, n_channels), dtype=np.int16)
+        cfg = self._small_chunk_config()
+
+        out_seq = tmp_path / "sequential.zarr"
+        build_mipmap(
+            source,
+            out_seq,
+            sampling_frequency=30000.0,
+            units="uV",
+            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0, prefetch_chunks=0),
+        )
+
+        out_pre = tmp_path / "prefetch.zarr"
+        build_mipmap(
+            source,
+            out_pre,
+            sampling_frequency=30000.0,
+            units="uV",
+            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0, prefetch_chunks=2),
+        )
+
+        root_seq = zarr.open_group(str(out_seq), mode="r", use_consolidated=None)
+        root_pre = zarr.open_group(str(out_pre), mode="r", use_consolidated=None)
+
+        np.testing.assert_array_equal(np.asarray(root_seq["raw"][:]), np.asarray(root_pre["raw"][:]))
+        np.testing.assert_array_equal(np.asarray(root_seq["minmax/s32"][:]), np.asarray(root_pre["minmax/s32"][:]))
+
 
 # ---------------------------------------------------------------------------
 # add_pyramid integration tests

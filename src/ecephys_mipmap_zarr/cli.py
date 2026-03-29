@@ -143,6 +143,9 @@ class BuildSettings(BaseSettings):
         description="Explicit noise floor in ADC RMS units (overrides auto-detection)",
     )
     clip_outliers: bool = Field(default=True, description="Clip rare outliers (<0.01%) to fit int8 when LSB-shifting")
+    prefetch_chunks: int = Field(
+        default=0, description="Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)"
+    )
 
     def cli_cmd(self) -> None:
         """Run the build command."""
@@ -193,6 +196,7 @@ class BuildSettings(BaseSettings):
             lsb_shift_pyramid=self.lsb_shift_pyramid,
             noise_floor=self.noise_floor,
             clip_outliers=self.clip_outliers,
+            prefetch_chunks=self.prefetch_chunks,
         )
         quant_config = QuantizationConfig(
             quantize=self.quantize,
@@ -234,6 +238,9 @@ class AddPyramidSettings(BaseSettings):
         description="Explicit noise floor in ADC RMS units (overrides auto-detection)",
     )
     clip_outliers: bool = Field(default=True, description="Clip rare outliers (<0.01%) to fit int8 when LSB-shifting")
+    prefetch_chunks: int = Field(
+        default=0, description="Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)"
+    )
 
     def cli_cmd(self) -> None:
         """Run the add-pyramid command."""
@@ -244,6 +251,7 @@ class AddPyramidSettings(BaseSettings):
             lsb_shift_pyramid=self.lsb_shift_pyramid,
             noise_floor=self.noise_floor,
             clip_outliers=self.clip_outliers,
+            prefetch_chunks=self.prefetch_chunks,
         )
         quant_config = QuantizationConfig(
             quantize=self.quantize,

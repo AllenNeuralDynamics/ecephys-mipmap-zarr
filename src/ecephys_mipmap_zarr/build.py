@@ -200,6 +200,7 @@ def build_mipmap(
             n_channels=n_channels,
             stats=stats,
             progress=progress,
+            prefetch_chunks=config.prefetch_chunks,
         )
         assert isinstance(s32_blocks_result, list)  # no shift in quantized path
 
@@ -325,6 +326,7 @@ def build_mipmap(
             noise_floor=noise_floor,
             progress=progress,
             clip_outliers=config.clip_outliers,
+            prefetch_chunks=config.prefetch_chunks,
         )
 
     # Copy source metadata if requested
@@ -457,6 +459,7 @@ def add_pyramid(
             n_samples=n_samples,
             stats=stats,
             progress=progress,
+            prefetch_chunks=config.prefetch_chunks,
         )
 
         # Compute level quantization
@@ -553,6 +556,7 @@ def add_pyramid(
                 base_stride=finest_stride,
                 n_samples=n_samples,
                 progress=progress,
+                prefetch_chunks=config.prefetch_chunks,
             )
             all_s32 = np.concatenate(s32_blocks, axis=2)
             shifted_s32 = (all_s32 >> pyr_shift).astype(np.int16)
@@ -650,6 +654,7 @@ def add_pyramid(
                 base_stride=finest_stride,
                 n_samples=n_samples,
                 progress=progress,
+                prefetch_chunks=config.prefetch_chunks,
             )
 
             _build_cascade_levels(

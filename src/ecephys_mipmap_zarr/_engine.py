@@ -8,7 +8,7 @@ build API.  Not part of the public API.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from typing import Any
 
@@ -443,6 +443,109 @@ ProgressCallback = Callable[[int, int], None]
 """Type for progress callbacks: ``(samples_processed, total_samples)``."""
 
 
+def _sequential_iter(
+    source: Any,
+    n_samples: int,
+    shard_samples: int,
+) -> Generator[tuple[int, int, npt.NDArray[Any]], None, None]:
+    """Yield (t0, t1, chunk) by reading source sequentially."""
+    for t0 in range(0, n_samples, shard_samples):
+        t1 = min(t0 + shard_samples, n_samples)
+        chunk = np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)  # (T,C) -> (C,T)
+        yield t0, t1, chunk
+
+
+def _prefetch_iter(
+    source: Any,
+    n_samples: int,
+    shard_samples: int,
+    n_ahead: int,
+) -> Generator[tuple[int, int, npt.NDArray[Any]], None, None]:
+    """Yield (t0, t1, chunk) with n_ahead chunks prefetched in threads.
+
+    Uses a sliding window: at most *n_ahead* chunks in memory at once.
+    """
+    from collections import deque
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    def _read(t0: int, t1: int) -> npt.NDArray[Any]:
+        return np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)
+
+    boundaries = [(t0, min(t0 + shard_samples, n_samples)) for t0 in range(0, n_samples, shard_samples)]
+
+    with ThreadPoolExecutor(max_workers=n_ahead) as pool:
+        pending: deque[tuple[int, int, Future[npt.NDArray[Any]]]] = deque()
+        idx = 0
+
+        # Prime
+        while idx < len(boundaries) and len(pending) < n_ahead:
+            t0, t1 = boundaries[idx]
+            pending.append((t0, t1, pool.submit(_read, t0, t1)))
+            idx += 1
+
+        # Consume and refill
+        while pending:
+            t0, t1, future = pending.popleft()
+            yield t0, t1, future.result()
+            if idx < len(boundaries):
+                t0_next, t1_next = boundaries[idx]
+                pending.append((t0_next, t1_next, pool.submit(_read, t0_next, t1_next)))
+                idx += 1
+
+
+def _sequential_iter_raw(
+    raw_array: zarr.Array,
+    n_samples: int,
+    shard_samples: int,
+    is_tc: bool,
+) -> Generator[tuple[int, int, npt.NDArray[Any]], None, None]:
+    """Yield (t0, t1, chunk) by reading a raw zarr array sequentially."""
+    for t0 in range(0, n_samples, shard_samples):
+        t1 = min(t0 + shard_samples, n_samples)
+        if is_tc:
+            chunk = np.ascontiguousarray(np.asarray(raw_array[t0:t1, :]).T)
+        else:
+            chunk = np.asarray(raw_array[:, t0:t1])
+        yield t0, t1, chunk
+
+
+def _prefetch_iter_raw(
+    raw_array: zarr.Array,
+    n_samples: int,
+    shard_samples: int,
+    n_ahead: int,
+    is_tc: bool,
+) -> Generator[tuple[int, int, npt.NDArray[Any]], None, None]:
+    """Yield (t0, t1, chunk) with n_ahead chunks prefetched from a raw zarr array.
+
+    Uses a sliding window: at most *n_ahead* chunks in memory at once.
+    """
+    from collections import deque
+    from concurrent.futures import Future, ThreadPoolExecutor
+
+    def _read(t0: int, t1: int) -> npt.NDArray[Any]:
+        if is_tc:
+            return np.ascontiguousarray(np.asarray(raw_array[t0:t1, :]).T)
+        return np.asarray(raw_array[:, t0:t1])
+
+    boundaries = [(t0, min(t0 + shard_samples, n_samples)) for t0 in range(0, n_samples, shard_samples)]
+
+    with ThreadPoolExecutor(max_workers=n_ahead) as pool:
+        pending: deque[tuple[int, int, Future[npt.NDArray[Any]]]] = deque()
+        idx = 0
+        while idx < len(boundaries) and len(pending) < n_ahead:
+            t0, t1 = boundaries[idx]
+            pending.append((t0, t1, pool.submit(_read, t0, t1)))
+            idx += 1
+        while pending:
+            t0, t1, future = pending.popleft()
+            yield t0, t1, future.result()
+            if idx < len(boundaries):
+                t0_next, t1_next = boundaries[idx]
+                pending.append((t0_next, t1_next, pool.submit(_read, t0_next, t1_next)))
+                idx += 1
+
+
 def _write_raw_and_compute_finest(
     source: Any,
     raw_array: zarr.Array,
@@ -456,6 +559,7 @@ def _write_raw_and_compute_finest(
     progress: ProgressCallback | None = None,
     lsb_shift_raw: int = 0,
     lsb_shift_pyramid: int = 0,
+    prefetch_chunks: int = 0,
 ) -> list[npt.NDArray[Any]] | _ShiftStats:
     """Write raw data and simultaneously compute the finest pyramid level.
 
@@ -493,6 +597,9 @@ def _write_raw_and_compute_finest(
         Right-shift for raw data before writing. Default 0 (lossless).
     lsb_shift_pyramid : int, optional
         Right-shift for pyramid data before writing. Default 0 (lossless).
+    prefetch_chunks : int, optional
+        Number of source chunks to prefetch in background threads.
+        ``0`` (default) disables prefetch.
 
     Returns
     -------
@@ -511,10 +618,12 @@ def _write_raw_and_compute_finest(
     raw_total = 0
     pyr_total = 0
 
-    for t0 in range(0, n_samples, shard_samples):
-        t1 = min(t0 + shard_samples, n_samples)
-        chunk = np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)  # (T,C) → (C,T)
+    if prefetch_chunks > 0:
+        chunk_iter = _prefetch_iter(source, n_samples, shard_samples, prefetch_chunks)
+    else:
+        chunk_iter = _sequential_iter(source, n_samples, shard_samples)
 
+    for t0, t1, chunk in chunk_iter:
         # Compute finest min/max from ORIGINAL (unshifted) data
         mm = _compute_minmax_block(chunk, base_stride)
 
@@ -579,6 +688,7 @@ def _build_finest_from_raw(
     n_samples: int,
     stats: _AccumulatedStats | None = None,
     progress: ProgressCallback | None = None,
+    prefetch_chunks: int = 0,
 ) -> list[npt.NDArray[Any]]:
     """Build the finest pyramid level by reading an existing raw array.
 
@@ -599,6 +709,9 @@ def _build_finest_from_raw(
         If provided, accumulate per-channel stats during the pass.
     progress : callable or None, optional
         Called with ``(samples_processed, total_samples)`` after each chunk.
+    prefetch_chunks : int, optional
+        Number of source chunks to prefetch in background threads.
+        ``0`` (default) disables prefetch.
 
     Returns
     -------
@@ -611,13 +724,12 @@ def _build_finest_from_raw(
     # Detect if source is (T, C) or (C, T)
     is_tc = raw_array.shape[0] > raw_array.shape[1]
 
-    for t0 in range(0, n_samples, shard_samples):
-        t1 = min(t0 + shard_samples, n_samples)
-        if is_tc:
-            chunk = np.ascontiguousarray(np.asarray(raw_array[t0:t1, :]).T)  # (T,C) → (C,T)
-        else:
-            chunk = np.asarray(raw_array[:, t0:t1])  # already (C,T)
+    if prefetch_chunks > 0:
+        chunk_iter = _prefetch_iter_raw(raw_array, n_samples, shard_samples, prefetch_chunks, is_tc)
+    else:
+        chunk_iter = _sequential_iter_raw(raw_array, n_samples, shard_samples, is_tc)
 
+    for t0, t1, chunk in chunk_iter:
         mm = _compute_minmax_block(chunk, base_stride)
 
         if finest_array is not None:
@@ -801,6 +913,7 @@ def _build_non_quantized(
     noise_floor: float | None,
     progress: ProgressCallback | None,
     clip_outliers: bool = True,
+    prefetch_chunks: int = 0,
 ) -> int:
     """Build raw + pyramid arrays with optional LSB shift.
 
@@ -861,6 +974,7 @@ def _build_non_quantized(
         progress=progress,
         lsb_shift_raw=raw_shift,
         lsb_shift_pyramid=pyr_shift,
+        prefetch_chunks=prefetch_chunks,
     )
 
     _build_cascade_levels(
