@@ -16,7 +16,7 @@ from ecephys_mipmap_zarr.metadata import RawQuantization
 __all__: list[str] = []  # private module
 
 
-def _open_store(path: str | Path, mode: str = "r") -> zarr.Group:
+def _open_store(path: str | Path, mode: str = "r", cache_dir: str | Path | None = None) -> zarr.Group:
     """Open a zarr store from a local path or remote URI.
 
     Supports ``s3://`` URIs via fsspec (requires the ``s3`` extra).
@@ -27,6 +27,10 @@ def _open_store(path: str | Path, mode: str = "r") -> zarr.Group:
         Local filesystem path or remote URI (e.g. ``s3://bucket/store.zarr``).
     mode : str, optional
         Open mode, by default ``"r"``.
+    cache_dir : str, Path, or None, optional
+        When set and *path* is a remote URI, an fsspec ``filecache``
+        layer is added so that fetched data is persisted locally.
+        Ignored for local paths.
 
     Returns
     -------
@@ -40,7 +44,15 @@ def _open_store(path: str | Path, mode: str = "r") -> zarr.Group:
             msg = "fsspec is required for remote URIs: pip install ecephys-mipmap-zarr[s3]"
             raise ImportError(msg) from e
         protocol = path_str.split("://")[0]
-        fs = fsspec.filesystem(protocol, anon=True)
+        if cache_dir is not None:
+            fs = fsspec.filesystem(
+                "filecache",
+                target_protocol=protocol,
+                cache_storage=str(cache_dir),
+                same_names=True,
+            )
+        else:
+            fs = fsspec.filesystem(protocol, anon=True)
         store = zarr.storage.FsspecStore(fs=fs, path=path_str.replace(f"{protocol}://", ""))
         return zarr.open_group(store, mode=mode, use_consolidated=None)  # type: ignore[arg-type]
     return zarr.open_group(path_str, mode=mode, use_consolidated=None)  # type: ignore[arg-type]

@@ -26,7 +26,7 @@ from ecephys_mipmap_zarr.metadata import (
     quantize_array,
     select_level,
 )
-from ecephys_mipmap_zarr.read import MipmapStore, WindowResult, open_mipmap
+from ecephys_mipmap_zarr.read import MipmapStore, ReadPlan, WindowResult, open_mipmap
 
 __all__ = [
     "__version__",
@@ -40,6 +40,7 @@ __all__ = [
     "MipmapStore",
     "QuantizationConfig",
     "RawQuantization",
+    "ReadPlan",
     "WindowResult",
     "add_pyramid",
     "build_mipmap",

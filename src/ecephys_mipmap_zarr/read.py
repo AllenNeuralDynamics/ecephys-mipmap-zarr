@@ -17,6 +17,15 @@ Two construction patterns are supported:
     attrs = MipmapAttrs.from_dict(dict(root.attrs))
     store = MipmapStore(root, attrs)
     result = store.get_window(t0, t1, num_points=1920)
+
+**Plan/execute** (for caching and deferred I/O)::
+
+    store = open_mipmap("path/to/store.zarr")
+    plan = store.plan_window(t0, t1, num_points=1920)
+    # plan is frozen and hashable -- usable as a cache key
+    result = store.execute_plan(plan, dequantize=False)
+    # ... later, dequantize on demand:
+    result = store.dequantize(result, plan)
 """
 
 from __future__ import annotations
@@ -43,12 +52,47 @@ from ecephys_mipmap_zarr.metadata import (
 __all__ = [
     "Channels",
     "MipmapStore",
+    "ReadPlan",
     "WindowResult",
     "open_mipmap",
 ]
 
 Channels = slice | list[int] | npt.NDArray[np.intp] | None
 """Type alias for channel selection: slice, list of ints, int array, or None (all)."""
+
+
+@dataclass(frozen=True, slots=True)
+class ReadPlan:
+    """Description of a windowed read, without executing I/O.
+
+    Frozen and hashable -- usable as a cache key.
+
+    Parameters
+    ----------
+    array_path : str
+        Zarr array path to read from (``"raw"`` or e.g. ``"minmax/s256"``).
+    stride : int or None
+        The pyramid stride, or ``None`` when reading raw data.
+    t0_actual : int
+        First sample index covered by the read (block-aligned for minmax).
+    t1_actual : int
+        One-past-the-end sample index covered.
+    block_start : int or None
+        First minmax block index, or ``None`` for raw reads.
+    block_end : int or None
+        One-past-the-end minmax block index, or ``None`` for raw reads.
+    channels : tuple[int, ...] or None
+        Normalized channel selection as a hashable tuple, or ``None``
+        to read all channels.
+    """
+
+    array_path: str
+    stride: int | None
+    t0_actual: int
+    t1_actual: int
+    block_start: int | None = None
+    block_end: int | None = None
+    channels: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,17 +114,48 @@ class WindowResult:
         One-past-the-end sample index covered.  For raw reads this
         equals the requested *t1* (after clamping).  For minmax reads
         this is ``block_end * stride``, clamped to *n_samples*.
+    dequantized : bool
+        Whether the data has been dequantized.  ``True`` (default) when
+        the reader applied quantization reversal or LSB-shift
+        reconstruction; ``False`` when raw stored values are returned.
     """
 
     data: npt.NDArray[Any]
     stride: int | None
     t0_actual: int
     t1_actual: int
+    dequantized: bool = True
 
     @property
     def is_raw(self) -> bool:
         """Return ``True`` if this result contains raw sample data."""
         return self.stride is None
+
+
+def _normalize_channels(channels: Channels, n_channels: int) -> tuple[int, ...] | None:
+    """Convert a channel selection to a hashable form.
+
+    Parameters
+    ----------
+    channels : Channels
+        Channel selection: ``None`` (all), a ``slice``, ``list[int]``,
+        or ``np.ndarray`` of integer indices.
+    n_channels : int
+        Total number of channels (used for slice expansion).
+
+    Returns
+    -------
+    tuple[int, ...] or None
+        ``None`` when all channels are selected, otherwise a tuple of
+        integer channel indices.
+    """
+    if channels is None:
+        return None
+    if isinstance(channels, slice):
+        return tuple(range(*channels.indices(n_channels)))
+    if isinstance(channels, np.ndarray):
+        return tuple(int(c) for c in channels)
+    return tuple(channels)
 
 
 class MipmapStore:
@@ -188,12 +263,123 @@ class MipmapStore:
         """Source metadata (probe, annotations), or ``None``."""
         return self._attrs.source_metadata
 
+    def plan_window(
+        self,
+        t0: int,
+        t1: int,
+        channels: Channels = None,
+        num_points: int = 1920,
+    ) -> ReadPlan:
+        """Plan a windowed read without executing I/O.
+
+        Performs the same level-selection logic as :meth:`get_window` but
+        returns a frozen :class:`ReadPlan` instead of reading data.  The
+        plan is hashable and can be used as a cache key.
+
+        Parameters
+        ----------
+        t0 : int
+            Start sample index (inclusive).
+        t1 : int
+            End sample index (exclusive).
+        channels : slice, list[int], np.ndarray, or None, optional
+            Channel selection.  ``None`` (default) selects all channels.
+        num_points : int, optional
+            Desired number of data points per channel.  Defaults to 1920.
+
+        Returns
+        -------
+        ReadPlan
+            A frozen description of the read to execute.
+
+        Raises
+        ------
+        ValueError
+            If the window is empty after clamping, or *num_points* <= 0.
+        RuntimeError
+            If raw data is needed but not available.
+        """
+        if num_points <= 0:
+            msg = f"num_points must be positive, got {num_points}"
+            raise ValueError(msg)
+
+        # Clamp sample range
+        t0 = max(0, t0)
+        t1 = min(t1, self._attrs.n_samples)
+        if t0 >= t1:
+            msg = f"Empty window after clamping: t0={t0}, t1={t1}"
+            raise ValueError(msg)
+
+        # Normalize channels
+        norm_channels = _normalize_channels(channels, self._attrs.n_channels)
+
+        # Select level
+        spp = (t1 - t0) / num_points
+        level = select_level(self._attrs.strides, spp)
+
+        if level is None:
+            if self._raw_array is None:
+                msg = "Raw data not available: store is pyramid-only and raw_source is not reachable"
+                raise RuntimeError(msg)
+            return ReadPlan(
+                array_path="raw",
+                stride=None,
+                t0_actual=t0,
+                t1_actual=t1,
+                channels=norm_channels,
+            )
+
+        mm_array = self._minmax_arrays[level]
+        total_blocks = mm_array.shape[2]  # blocks are axis 2 in (C, 2, B)
+        block_start = t0 // level
+        block_end = min(math.ceil(t1 / level), total_blocks)
+        t0_actual = block_start * level
+        t1_actual = min(block_end * level, self._attrs.n_samples)
+
+        return ReadPlan(
+            array_path=minmax_path(level).lstrip("/"),
+            stride=level,
+            t0_actual=t0_actual,
+            t1_actual=t1_actual,
+            block_start=block_start,
+            block_end=block_end,
+            channels=norm_channels,
+        )
+
+    def execute_plan(self, plan: ReadPlan, dequantize: bool = True) -> WindowResult:
+        """Execute a :class:`ReadPlan` and return the data.
+
+        Parameters
+        ----------
+        plan : ReadPlan
+            A plan previously obtained from :meth:`plan_window`.
+        dequantize : bool, optional
+            If ``True`` (default), apply dequantization or LSB-shift
+            reconstruction.  If ``False``, return data in its stored
+            dtype with ``dequantized=False`` on the result.
+
+        Returns
+        -------
+        WindowResult
+            The read data.
+        """
+        # Convert plan.channels back to a channel selector for array indexing
+        if plan.channels is None:
+            chan_sel: slice | list[int] = slice(None)
+        else:
+            chan_sel = list(plan.channels)
+
+        if plan.stride is None:
+            return self._read_raw(plan.t0_actual, plan.t1_actual, chan_sel, dequantize=dequantize)
+        return self._read_minmax(plan.stride, plan.t0_actual, plan.t1_actual, chan_sel, dequantize=dequantize)
+
     def get_window(
         self,
         t0: int,
         t1: int,
         channels: Channels = None,
         num_points: int = 1920,
+        dequantize: bool = True,
     ) -> WindowResult:
         """Read a time window at the appropriate resolution level.
 
@@ -214,6 +400,11 @@ class MipmapStore:
             The returned data will have at least this many points
             (oversampled by ~4x at the chosen pyramid level).  Defaults
             to 1920.
+        dequantize : bool, optional
+            If ``True`` (default), apply dequantization or LSB-shift
+            reconstruction so that the returned data is in the original
+            dtype/range.  If ``False``, return data in its stored dtype
+            with ``dequantized=False`` on the result.
 
         Returns
         -------
@@ -229,35 +420,85 @@ class MipmapStore:
             If raw data is needed but not available (pyramid-only store
             without a reachable raw source).
         """
-        if num_points <= 0:
-            msg = f"num_points must be positive, got {num_points}"
-            raise ValueError(msg)
+        plan = self.plan_window(t0, t1, channels, num_points)
+        return self.execute_plan(plan, dequantize=dequantize)
 
-        # Clamp sample range
-        t0 = max(0, t0)
-        t1 = min(t1, self._attrs.n_samples)
-        if t0 >= t1:
-            msg = f"Empty window after clamping: t0={t0}, t1={t1}"
-            raise ValueError(msg)
+    def dequantize(self, result: WindowResult, plan: ReadPlan) -> WindowResult:
+        """Dequantize a :class:`WindowResult` obtained with ``dequantize=False``.
 
-        # Normalize channels
-        chan_sel: slice | list[int] | npt.NDArray[np.intp] = slice(None) if channels is None else channels
+        If the result is already dequantized this is a no-op.
 
-        # Select level
-        spp = (t1 - t0) / num_points
-        level = select_level(self._attrs.strides, spp)
+        Parameters
+        ----------
+        result : WindowResult
+            A result previously obtained from :meth:`execute_plan` or
+            :meth:`get_window` with ``dequantize=False``.
+        plan : ReadPlan
+            The plan that produced *result* (needed to select the correct
+            per-channel quantization parameters).
 
-        if level is None:
-            return self._read_raw(t0, t1, chan_sel)
-        return self._read_minmax(level, t0, t1, chan_sel)
+        Returns
+        -------
+        WindowResult
+            A new result with dequantized data and ``dequantized=True``.
+        """
+        if result.dequantized:
+            return result
+
+        data = result.data
+
+        # Determine channel selector for subsetting quantization params
+        if plan.channels is None:
+            chan_sel: slice | list[int] = slice(None)
+        else:
+            chan_sel = list(plan.channels)
+
+        if result.is_raw:
+            if self._raw_quantization is not None:
+                offset = np.array(self._raw_quantization.offset)[chan_sel]
+                scale = np.array(self._raw_quantization.scale)[chan_sel]
+                data = dequantize_array(data, offset, scale)
+            elif self._raw_lsb_shift > 0:
+                data = data.astype(np.int16) << self._raw_lsb_shift
+        else:
+            if self._level_quantization is not None:
+                min_offset = np.array(self._level_quantization.min_offset)[chan_sel]
+                max_offset = np.array(self._level_quantization.max_offset)[chan_sel]
+                lq_scale = np.array(self._level_quantization.scale)[chan_sel]
+                mins = dequantize_array(data[:, 0, :], min_offset, lq_scale)
+                maxs = dequantize_array(data[:, 1, :], max_offset, lq_scale)
+                data = np.stack([mins, maxs], axis=1)
+            elif self._pyr_lsb_shift > 0:
+                data = data.astype(np.int16) << self._pyr_lsb_shift
+
+        return WindowResult(
+            data=data,
+            stride=result.stride,
+            t0_actual=result.t0_actual,
+            t1_actual=result.t1_actual,
+            dequantized=True,
+        )
 
     def _read_raw(
         self,
         t0: int,
         t1: int,
         chan_sel: slice | list[int] | npt.NDArray[np.intp],
+        dequantize: bool = True,
     ) -> WindowResult:
-        """Read raw data for the given sample range."""
+        """Read raw data for the given sample range.
+
+        Parameters
+        ----------
+        t0 : int
+            Start sample index (inclusive).
+        t1 : int
+            End sample index (exclusive).
+        chan_sel : slice, list[int], or np.ndarray
+            Channel selector.
+        dequantize : bool, optional
+            Apply dequantization / LSB-shift reconstruction (default ``True``).
+        """
         if self._raw_array is None:
             msg = "Raw data not available: store is pyramid-only and raw_source is not reachable"
             raise RuntimeError(msg)
@@ -271,6 +512,9 @@ class MipmapStore:
         else:
             # Our convention (C, T)
             data = np.asarray(self._raw_array[chan_sel, t0:t1])  # type: ignore[index]
+
+        if not dequantize:
+            return WindowResult(data=data, stride=None, t0_actual=t0, t1_actual=t1, dequantized=False)
 
         if self._raw_quantization is not None:
             offset = np.array(self._raw_quantization.offset)
@@ -291,8 +535,23 @@ class MipmapStore:
         t0: int,
         t1: int,
         chan_sel: slice | list[int] | npt.NDArray[np.intp],
+        dequantize: bool = True,
     ) -> WindowResult:
-        """Read minmax data for the given sample range at a pyramid level."""
+        """Read minmax data for the given sample range at a pyramid level.
+
+        Parameters
+        ----------
+        stride : int
+            Pyramid stride.
+        t0 : int
+            Start sample index (inclusive).
+        t1 : int
+            End sample index (exclusive).
+        chan_sel : slice, list[int], or np.ndarray
+            Channel selector.
+        dequantize : bool, optional
+            Apply dequantization / LSB-shift reconstruction (default ``True``).
+        """
         mm_array = self._minmax_arrays[stride]
         total_blocks = mm_array.shape[2]  # blocks are axis 2 in (C, 2, B)
 
@@ -303,6 +562,9 @@ class MipmapStore:
         t1_actual = min(block_end * stride, self._attrs.n_samples)
 
         data = np.asarray(mm_array[chan_sel, :, block_start:block_end])  # type: ignore[index]
+
+        if not dequantize:
+            return WindowResult(data=data, stride=stride, t0_actual=t0_actual, t1_actual=t1_actual, dequantized=False)
 
         if self._level_quantization is not None:
             min_offset = np.array(self._level_quantization.min_offset)
@@ -327,7 +589,7 @@ class MipmapStore:
         return WindowResult(data=data, stride=stride, t0_actual=t0_actual, t1_actual=t1_actual)
 
 
-def open_mipmap(store_path: str | Path) -> MipmapStore:
+def open_mipmap(store_path: str | Path, cache_dir: str | Path | None = None) -> MipmapStore:
     """Open a mipmap Zarr store for reading.
 
     Handles both co-located stores (raw + pyramids together) and
@@ -338,6 +600,10 @@ def open_mipmap(store_path: str | Path) -> MipmapStore:
     ----------
     store_path : str or Path
         Path to the mipmap Zarr store.
+    cache_dir : str, Path, or None, optional
+        When set and *store_path* is a remote URI (contains ``://``),
+        an fsspec ``filecache`` layer is added so that fetched data is
+        persisted locally in *cache_dir*.  Ignored for local paths.
 
     Returns
     -------
@@ -349,11 +615,11 @@ def open_mipmap(store_path: str | Path) -> MipmapStore:
     KeyError
         If required root attributes are missing.
     """
-    root = _open_store(store_path, mode="r")
+    root = _open_store(store_path, mode="r", cache_dir=cache_dir)
     attrs = MipmapAttrs.from_dict(dict(root.attrs))
 
     raw_group: zarr.Group | None = None
     if attrs.raw_source is not None:
-        raw_group = _open_store(attrs.raw_source, mode="r")
+        raw_group = _open_store(attrs.raw_source, mode="r", cache_dir=cache_dir)
 
     return MipmapStore(root, attrs, raw_group=raw_group)

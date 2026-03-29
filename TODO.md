@@ -180,20 +180,40 @@ Switched from `(T, C)` to `(C, T)` for raw and `(B, 2, C)` to `(C, 2, B)` for mi
 
 Benchmarked: 4% compression improvement on filtered, 9% on raw. 47% faster writes.
 
-## Raw (non-dequantized) read mode
+## Read planning and I/O separation
 
-Currently `get_window` always dequantizes to float32 when `RawQuantization` is present. Add a way to read the stored values directly without dequantization — useful for caching (avoid repeated float conversion), custom processing, or when the caller wants ADC units.
+Separate "what to read" from "how to read it" so callers can implement their own caching, prefetch, and async strategies using the library's planning primitives.
 
-Options:
-- `get_window(..., dequantize=False)` — returns stored dtype (int8/int16/uint16) instead of float32
-- `MipmapStore.get_raw_window(t0, t1, channels)` — separate method, always returns stored values
-- Both the raw array and pyramid arrays should support this
+### ReadPlan + plan_window()
+
+Split `get_window()` into a pure computation step (`plan_window()`) and an I/O step (`execute_plan()`). The plan is a frozen, hashable dataclass usable as a cache key.
+
+```python
+@dataclass(frozen=True, slots=True)
+class ReadPlan:
+    array_path: str              # "raw" or "minmax/s256"
+    stride: int | None           # None for raw
+    t0_actual: int
+    t1_actual: int
+    block_start: int | None      # minmax only
+    block_end: int | None        # minmax only
+    channels: tuple[int, ...] | None  # normalized; None = all
+```
+
+### dequantize=False support
+
+`execute_plan(plan, dequantize=False)` and `get_window(..., dequantize=False)` return stored representation (int8/uint16) instead of float32. Standalone `dequantize(result)` method for cached non-dequantized data.
 
 ### Implementation tasks
-- [ ] Add `dequantize: bool = True` parameter to `get_window`
-- [ ] When `dequantize=False`, skip the `dequantize_array` call in `_read_raw` and `_read_minmax`
-- [ ] `WindowResult` should indicate whether data was dequantized (add `dequantized: bool` field?)
-- [ ] Document that stored dtype may differ from `MipmapAttrs.dtype` when quantization is active
+- [ ] Add `ReadPlan` dataclass to `read.py`
+- [ ] Add `plan_window(t0, t1, channels, num_points)` → `ReadPlan` to `MipmapStore`
+- [ ] Add `execute_plan(plan, dequantize=True)` → `WindowResult` to `MipmapStore`
+- [ ] Refactor `get_window()` to use `plan_window() + execute_plan()` internally
+- [ ] Add `dequantize: bool = True` parameter to `get_window` and `execute_plan`
+- [ ] When `dequantize=False`, skip dequantize_array/lsb_shift in `_read_raw`/`_read_minmax`
+- [ ] Add standalone `dequantize(result)` method to `MipmapStore`
+- [ ] Add `dequantized: bool` field to `WindowResult`
+- [ ] Export `ReadPlan` from `__init__.py`
 
 ## Interactive unit selection widget
 
@@ -291,48 +311,43 @@ Save the current viewport as PNG or SVG.
 - [ ] Use `bokeh.io.export_png` or `export_svgs` (requires selenium or playwright)
 - [ ] Or simpler: Bokeh's built-in save tool (already available in toolbar)
 
-## Viewer prefetching/caching
+## Store-layer caching (fsspec)
 
-Cache compressed zarr shards for the viewer to reduce latency when panning. The viewer reads small windows frequently — caching previously fetched shards (especially for S3 stores) avoids redundant network requests.
+Add `cache_dir` parameter to `open_mipmap()` to configure fsspec's `filecache` protocol for S3 stores. This gives persistent, cross-session shard caching at the zarr store layer with no library complexity.
 
-### Design
-
-- Cache at the zarr shard level (compressed bytes), not decoded arrays — saves memory and avoids redundant decompression overhead
-- LRU eviction policy, configurable max cache size (default: 256 MB?)
-- zarr v3 may support custom store wrappers or caching stores — investigate `zarr.storage.LRUStoreCache` or fsspec caching
-- Prefetch adjacent shards when user is panning (predict direction from x_range change)
+```python
+store = open_mipmap("s3://bucket/store.zarr", cache_dir="/tmp/zarr_cache")
+```
 
 ### Implementation tasks
+- [ ] Add `cache_dir: str | Path | None` parameter to `open_mipmap()` and `_open_store()`
+- [ ] When `cache_dir` is set and protocol is remote, wrap with fsspec `filecache`
+- [ ] Add `--cache-dir` to CLI `view` and `add-pyramid` commands
+- [ ] Document the caching pattern in README/CLAUDE.md
 
-- [ ] Investigate zarr v3 caching store options (LRUStoreCache, fsspec cache)
-- [ ] Implement or configure shard-level caching for MipmapStore
-- [ ] Add prefetch logic to viewer: predict pan direction, preload adjacent shards
-- [ ] Configurable cache size (CLI flag, viewer param)
+## Viewer prefetching and RAM cache
 
-## Async/threaded reader
+Build on the ReadPlan primitives to add responsive panning for the viewer. Two layers:
 
-The reader currently blocks on zarr I/O. For the viewer and server-side use, async or threaded reads would prevent UI freezes and enable concurrent requests.
+### Layer 1: RAM LRU cache (~500 MB)
+- `dict[ReadPlan, WindowResult]` keyed by plan (which is hashable)
+- Cache non-dequantized results (compact int8/uint16), dequantize on render
+- LRU eviction by total array bytes
 
-### Design
-
-- zarr v3 has native async support (`zarr.api.asynchronous`)
-- Option 1: `async get_window()` using zarr's async API
-- Option 2: Thread pool executor wrapping synchronous reads (simpler, works with existing code)
-- Viewer could use `pn.state.execute` or `asyncio.to_thread` to avoid blocking the event loop
+### Layer 2: Threaded prefetch
+- On viewport change, `plan_window()` for current + adjacent viewports
+- Check RAM cache → submit `execute_plan()` to thread pool on miss
+- Cancel stale prefetches when user pans rapidly (only latest viewport matters)
+- Use `concurrent.futures.ThreadPoolExecutor` (Panel-compatible)
 
 ### Implementation tasks
+- [ ] Add `ViewportCache` class to viewer (LRU dict, byte-budget eviction)
+- [ ] Integrate `plan_window()` + `execute_plan(dequantize=False)` into viewer update
+- [ ] Add prefetch for adjacent viewports (left/right at same level)
+- [ ] Add prefetch for one finer level (zoom-in prediction)
+- [ ] Thread pool for background fetches with cancellation
+- [ ] `dequantize()` at render time from cached compact results
 
-- [ ] Evaluate zarr v3 async API for reading (array slicing, group access)
-- [ ] Add `async get_window()` to MipmapStore or a separate AsyncMipmapStore
-- [ ] Wire async reads into viewer update callback
-- [ ] Consider thread-safe access patterns for shared MipmapStore instances
+## ~~Evaluate codebase structure~~ DONE
 
-## Evaluate codebase structure
-
-Review the current module layout and determine if the codebase would benefit from reorganization as it grows. Consider:
-
-- [ ] Whether `build.py` should be split (e.g. `build_core.py` + `build_lsb.py` or `build_quantize.py`)
-- [ ] Whether `viewer.py` split into `viewer_core.py` + `viewer_bokeh.py` is still the right plan
-- [ ] Whether metadata/schema types should move to a separate `types.py` or `schema.py`
-- [ ] Whether CLI should be split per subcommand
-- [ ] Overall import graph and circular dependency risks
+Restructured: extracted `_store.py` (store utilities) and `_engine.py` (write engine) from build.py. Added `BuildConfig`/`QuantizationConfig` dataclasses to consolidate parameter lists. build.py reduced from 1,763 to ~750 lines. Viewer split deferred — 695 lines is reasonable for a single-purpose UI module.
