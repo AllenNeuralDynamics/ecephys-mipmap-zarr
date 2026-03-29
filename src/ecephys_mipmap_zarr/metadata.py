@@ -19,14 +19,18 @@ import numpy.typing as npt
 
 __all__ = [
     "BASE_STRIDE",
+    "BuildConfig",
     "ChunkConfig",
+    "DEFAULT_BUILD_CONFIG",
     "DEFAULT_CHUNK_CONFIG",
     "DEFAULT_CHANNEL_CHUNK",
     "DEFAULT_DTYPE",
+    "DEFAULT_QUANTIZATION_CONFIG",
     "LevelQuantization",
     "MIN_TOP_BLOCKS",
     "MINMAX_PREFIX",
     "MipmapAttrs",
+    "QuantizationConfig",
     "RAW_PATH",
     "RawQuantization",
     "STRIDE_FACTOR",
@@ -138,6 +142,89 @@ class ChunkConfig:
 
 DEFAULT_CHUNK_CONFIG: ChunkConfig = ChunkConfig()
 """Module-level default chunk/shard configuration."""
+
+
+@dataclass(frozen=True, slots=True)
+class BuildConfig:
+    """Configuration for pyramid geometry, chunking, and compression.
+
+    Groups the build parameters that are shared identically across
+    :func:`~ecephys_mipmap_zarr.build.build_mipmap`,
+    :func:`~ecephys_mipmap_zarr.build.add_pyramid`, and
+    :func:`~ecephys_mipmap_zarr.build.ensure_pyramid`.
+
+    Parameters
+    ----------
+    chunk_config : ChunkConfig
+        Chunk/shard shape configuration.
+    base_stride : int
+        Base stride for the finest pyramid level.
+    stride_factor : int
+        Multiplicative factor between levels.
+    min_top_blocks : int
+        Minimum blocks at the coarsest level.
+    compressor : str or BytesBytesCodec
+        Compressor preset or codec instance.
+    consolidate_metadata : bool
+        Write consolidated metadata.
+    lsb_shift_raw : int or str
+        Right-shift for raw data: ``0`` (lossless), ``"auto"``
+        (noise-based), or a positive integer.
+    lsb_shift_pyramid : int or str
+        Right-shift for pyramid data.
+    noise_floor : float or None
+        Explicit noise floor override (ADC RMS).
+    """
+
+    chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG
+    base_stride: int = BASE_STRIDE
+    stride_factor: int = STRIDE_FACTOR
+    min_top_blocks: int = MIN_TOP_BLOCKS
+    compressor: str | Any = "blosc"  # str | BytesBytesCodec at runtime
+    consolidate_metadata: bool = True
+    lsb_shift_raw: int | str = "auto"
+    lsb_shift_pyramid: int | str = "auto"
+    noise_floor: float | None = None
+
+
+DEFAULT_BUILD_CONFIG: BuildConfig = BuildConfig()
+"""Module-level default build configuration."""
+
+
+@dataclass(frozen=True, slots=True)
+class QuantizationConfig:
+    """Configuration for data quantization.
+
+    Parameters
+    ----------
+    quantize : bool
+        Enable quantization (float32 -> uint16 raw + uint8 pyramids).
+    quantize_raw : bool or None
+        Override quantize for raw data only.
+    quantize_pyramids : bool or None
+        Override quantize for pyramids only.
+    raw_quantized_dtype : str
+        Target dtype for quantized raw data.
+    pyramid_quantized_dtype : str
+        Target dtype for quantized pyramid data.
+    raw_quantization : RawQuantization or None
+        User-provided raw quantization params.
+    level_quantization : LevelQuantization or None
+        User-provided level quantization params.
+    """
+
+    quantize: bool = False
+    quantize_raw: bool | None = None
+    quantize_pyramids: bool | None = None
+    raw_quantized_dtype: str = "uint16"
+    pyramid_quantized_dtype: str = "uint8"
+    # Forward references resolved after RawQuantization/LevelQuantization are defined
+    raw_quantization: Any = None
+    level_quantization: Any = None
+
+
+DEFAULT_QUANTIZATION_CONFIG: QuantizationConfig = QuantizationConfig()
+"""Module-level default quantization configuration."""
 
 
 @dataclass(frozen=True, slots=True)

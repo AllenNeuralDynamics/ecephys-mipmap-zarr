@@ -9,10 +9,14 @@ except PackageNotFoundError:
 
 from ecephys_mipmap_zarr.build import add_pyramid, build_mipmap, ensure_pyramid
 from ecephys_mipmap_zarr.metadata import (
+    DEFAULT_BUILD_CONFIG,
     DEFAULT_CHUNK_CONFIG,
+    DEFAULT_QUANTIZATION_CONFIG,
+    BuildConfig,
     ChunkConfig,
     LevelQuantization,
     MipmapAttrs,
+    QuantizationConfig,
     RawQuantization,
     compute_quantization_params,
     compute_strides,
@@ -26,11 +30,15 @@ from ecephys_mipmap_zarr.read import MipmapStore, WindowResult, open_mipmap
 
 __all__ = [
     "__version__",
+    "BuildConfig",
     "ChunkConfig",
+    "DEFAULT_BUILD_CONFIG",
     "DEFAULT_CHUNK_CONFIG",
+    "DEFAULT_QUANTIZATION_CONFIG",
     "LevelQuantization",
     "MipmapAttrs",
     "MipmapStore",
+    "QuantizationConfig",
     "RawQuantization",
     "WindowResult",
     "add_pyramid",
