@@ -267,18 +267,13 @@ This enables a future `viewer_pyqtgraph.py` (~80-100 lines) for desktop use with
 - [ ] `viewer.py` imports from `viewer_core.py` and handles only Bokeh rendering
 - [ ] No new functionality — just a clean separation
 
-## Progress indication for builds
+## ~~Progress indication for builds~~ DONE
 
-Use `rich.progress.Progress` in the CLI build commands. The chunked iteration loops in `_write_raw_and_compute_finest` and `_build_finest_from_raw` need a callback or iterator wrapper.
+Implemented: `ProgressCallback` type alias, `_progress_bar()` context manager with rich Progress. Both `build` and `add-pyramid` CLI commands use it. Callback wired through `_write_raw_and_compute_finest` and `_build_finest_from_raw`.
 
-- [ ] Add optional `progress_callback` to builder internals
-- [ ] CLI wraps with rich progress bar (total = n_samples / shard_samples)
+## ~~CLI error handling~~ DONE
 
-## CLI error handling
-
-Pydantic-settings `CliApp` swallows exceptions silently (exit code 1, no output). Wrap `cli_cmd()` methods with try/except that prints the traceback via `rich.console.print_exception()`.
-
-- [ ] Add error handling wrapper to CLI subcommands
+Implemented: `main()` wraps `CliApp.run(CLI)` in try/except with `console.print_exception()` and `SystemExit(1)`.
 
 ## Overview minimap
 

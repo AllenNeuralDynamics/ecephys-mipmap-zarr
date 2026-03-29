@@ -351,7 +351,10 @@ class CLI(BaseSettings):
 def main() -> None:
     """CLI entry point."""
     try:
-        CliApp.run(CLI)
+        model = CliApp.run(CLI)
+        CliApp.run_subcommand(model)
+    except SystemExit:
+        raise
     except Exception:
         console.print_exception()
         raise SystemExit(1) from None
