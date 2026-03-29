@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 
 from ecephys_mipmap_zarr.build import build_mipmap
-from ecephys_mipmap_zarr.metadata import ChunkConfig
+from ecephys_mipmap_zarr.metadata import BuildConfig, ChunkConfig
 from ecephys_mipmap_zarr.read import open_mipmap
 from ecephys_mipmap_zarr.viewer import TraceViewer, view
 
@@ -26,9 +26,7 @@ def _make_store(tmp_path, n_samples=100_000, n_channels=8):
         out,
         sampling_frequency=30000.0,
         units="uV",
-        chunk_config=SMALL_CFG,
-        lsb_shift_raw=0,
-        lsb_shift_pyramid=0,
+        config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
     )
     return open_mipmap(out), out
 

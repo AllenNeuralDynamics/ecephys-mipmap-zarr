@@ -5,7 +5,7 @@ import zarr
 
 from ecephys_mipmap_zarr.build import build_mipmap
 from ecephys_mipmap_zarr.cli import AddPyramidSettings, BuildSettings, InfoSettings
-from ecephys_mipmap_zarr.metadata import ChunkConfig, MipmapAttrs, compute_strides
+from ecephys_mipmap_zarr.metadata import BuildConfig, ChunkConfig, MipmapAttrs, QuantizationConfig, compute_strides
 
 SMALL_CFG = ChunkConfig(
     raw_chunk=(4, 1024),
@@ -130,7 +130,11 @@ class TestInfoCLI:
         cfg = SMALL_CFG
 
         build_mipmap(
-            source, out, sampling_frequency=30000.0, units="uV", chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0
+            source,
+            out,
+            sampling_frequency=30000.0,
+            units="uV",
+            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
         )
 
         settings = InfoSettings(store_path=str(out))
@@ -150,10 +154,8 @@ class TestInfoCLI:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            chunk_config=cfg,
-            quantize=True,
-            lsb_shift_raw=0,
-            lsb_shift_pyramid=0,
+            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            quantization=QuantizationConfig(quantize=True),
         )
 
         settings = InfoSettings(store_path=str(out))

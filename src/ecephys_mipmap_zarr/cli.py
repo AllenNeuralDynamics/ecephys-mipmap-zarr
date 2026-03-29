@@ -26,6 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ecephys_mipmap_zarr.build import ProgressCallback, add_pyramid, build_mipmap
+from ecephys_mipmap_zarr.metadata import BuildConfig, QuantizationConfig
 from ecephys_mipmap_zarr.read import open_mipmap
 
 console = Console()
@@ -185,6 +186,16 @@ class BuildSettings(BaseSettings):
             source = np.memmap(self.input, dtype=dtype, mode="r", shape=(n_samples, n_channels))
 
         console.print(f"Building mipmap → {self.output}")
+        build_config = BuildConfig(
+            compressor=self.compressor,
+            lsb_shift_raw=self.lsb_shift_raw,
+            lsb_shift_pyramid=self.lsb_shift_pyramid,
+            noise_floor=self.noise_floor,
+        )
+        quant_config = QuantizationConfig(
+            quantize=self.quantize,
+            quantize_pyramids=self.quantize_pyramids,
+        )
         with _progress_bar() as progress_fn:
             build_mipmap(
                 source,
@@ -192,14 +203,10 @@ class BuildSettings(BaseSettings):
                 sampling_frequency=sampling_frequency,
                 units=self.units,
                 dtype=dtype,
-                quantize=self.quantize,
-                quantize_pyramids=self.quantize_pyramids,
-                compressor=self.compressor,
+                config=build_config,
+                quantization=quant_config,
                 metadata_from=self.metadata_from,
                 progress=progress_fn,
-                lsb_shift_raw=self.lsb_shift_raw,
-                lsb_shift_pyramid=self.lsb_shift_pyramid,
-                noise_floor=self.noise_floor,
             )
         console.print("[green]Done.[/green]")
 
@@ -229,6 +236,14 @@ class AddPyramidSettings(BaseSettings):
         """Run the add-pyramid command."""
         console.print(f"Reading raw from: {self.raw_store}")
         console.print(f"Building pyramids → {self.output}")
+        build_config = BuildConfig(
+            compressor=self.compressor,
+            lsb_shift_pyramid=self.lsb_shift_pyramid,
+            noise_floor=self.noise_floor,
+        )
+        quant_config = QuantizationConfig(
+            quantize=self.quantize,
+        )
         with _progress_bar() as progress_fn:
             add_pyramid(
                 self.raw_store,
@@ -236,11 +251,9 @@ class AddPyramidSettings(BaseSettings):
                 sampling_frequency=self.sampling_frequency,
                 units=self.units,
                 raw_path=self.raw_path,
-                quantize=self.quantize,
-                compressor=self.compressor,
+                config=build_config,
+                quantization=quant_config,
                 progress=progress_fn,
-                lsb_shift_pyramid=self.lsb_shift_pyramid,
-                noise_floor=self.noise_floor,
             )
         console.print("[green]Done.[/green]")
 

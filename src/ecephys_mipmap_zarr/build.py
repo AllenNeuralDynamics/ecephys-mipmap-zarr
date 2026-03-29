@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 import numpy as np
 import zarr
-from zarr.abc.codec import BytesBytesCodec
 
 from ecephys_mipmap_zarr._engine import (  # noqa: F401 — re-exported for backward compat
     ProgressCallback,
@@ -44,14 +43,13 @@ from ecephys_mipmap_zarr._store import (
     _open_store,
 )
 from ecephys_mipmap_zarr.metadata import (
-    BASE_STRIDE,
-    DEFAULT_CHUNK_CONFIG,
+    DEFAULT_BUILD_CONFIG,
     DEFAULT_DTYPE,
-    MIN_TOP_BLOCKS,
-    STRIDE_FACTOR,
-    ChunkConfig,
+    DEFAULT_QUANTIZATION_CONFIG,
+    BuildConfig,
     LevelQuantization,
     MipmapAttrs,
+    QuantizationConfig,
     RawQuantization,
     compute_entropy,
     compute_quantization_params,
@@ -86,24 +84,10 @@ def build_mipmap(
     sampling_frequency: float,
     units: str,
     dtype: str = DEFAULT_DTYPE,
-    chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG,
-    base_stride: int = BASE_STRIDE,
-    stride_factor: int = STRIDE_FACTOR,
-    min_top_blocks: int = MIN_TOP_BLOCKS,
-    compressor: str | BytesBytesCodec = "blosc",
-    consolidate_metadata: bool = True,
-    quantize: bool = False,
-    quantize_raw: bool | None = None,
-    quantize_pyramids: bool | None = None,
-    raw_quantized_dtype: str = "uint16",
-    pyramid_quantized_dtype: str = "uint8",
-    raw_quantization: RawQuantization | None = None,
-    level_quantization: LevelQuantization | None = None,
+    config: BuildConfig = DEFAULT_BUILD_CONFIG,
+    quantization: QuantizationConfig = DEFAULT_QUANTIZATION_CONFIG,
     metadata_from: str | Path | None = None,
     progress: ProgressCallback | None = None,
-    lsb_shift_raw: int | str = "auto",
-    lsb_shift_pyramid: int | str = "auto",
-    noise_floor: float | None = None,
 ) -> None:
     """Build a complete mipmap Zarr store from an array-like source.
 
@@ -125,36 +109,12 @@ def build_mipmap(
         Physical units of the data (e.g. ``"uV"``).
     dtype : str, optional
         Dtype for raw and pyramid arrays, by default ``"int16"``.
-    chunk_config : ChunkConfig, optional
-        Chunk/shard configuration, by default :data:`DEFAULT_CHUNK_CONFIG`.
-    base_stride : int, optional
-        Base stride for the finest pyramid level, by default 32.
-    stride_factor : int, optional
-        Multiplicative factor between levels, by default 8.
-    min_top_blocks : int, optional
-        Minimum blocks at the coarsest level, by default 1024.
-    compressor : str or Codec, optional
-        Compressor preset (``"blosc"``, ``"gzip"``, ``"zstd"``) or a
-        zarr ``Codec`` instance, by default ``"blosc"``.
-    consolidate_metadata : bool, optional
-        Write consolidated metadata for faster store opens, by default
-        ``True``.
-    quantize : bool, optional
-        Quantize raw to *raw_quantized_dtype* and pyramids to
-        *pyramid_quantized_dtype* for better compression, by default
-        ``False``.
-    raw_quantized_dtype : str, optional
-        Target dtype for quantized raw data, by default ``"uint16"``.
-    pyramid_quantized_dtype : str, optional
-        Target dtype for quantized pyramid data, by default ``"uint8"``.
-    raw_quantization : RawQuantization or None, optional
-        User-provided quantization params for raw data.  If ``None`` and
-        *quantize* is ``True``, params are auto-computed from data
-        statistics (requires two passes over the source).
-    level_quantization : LevelQuantization or None, optional
-        User-provided quantization params for pyramid levels (shared
-        across all levels).  If ``None`` and *quantize* is ``True``,
-        auto-computed from finest level statistics.
+    config : BuildConfig, optional
+        Build configuration for pyramid geometry, chunking, compression,
+        and LSB-shift settings, by default :data:`DEFAULT_BUILD_CONFIG`.
+    quantization : QuantizationConfig, optional
+        Quantization configuration for raw and pyramid data,
+        by default :data:`DEFAULT_QUANTIZATION_CONFIG`.
     metadata_from : str, Path, or None, optional
         Path or URI to a zarr store from which to copy source metadata
         (e.g. SpikeInterface probe geometry, channel IDs).  Useful
@@ -166,6 +126,26 @@ def build_mipmap(
         If *source* has fewer than two dimensions, or the recording is
         too short for any pyramid level.
     """
+    # Unpack config
+    chunk_config = config.chunk_config
+    base_stride = config.base_stride
+    stride_factor = config.stride_factor
+    min_top_blocks = config.min_top_blocks
+    compressor = config.compressor
+    consolidate_metadata = config.consolidate_metadata
+    lsb_shift_raw = config.lsb_shift_raw
+    lsb_shift_pyramid = config.lsb_shift_pyramid
+    noise_floor = config.noise_floor
+
+    # Unpack quantization
+    quantize = quantization.quantize
+    quantize_raw = quantization.quantize_raw
+    quantize_pyramids = quantization.quantize_pyramids
+    raw_quantized_dtype = quantization.raw_quantized_dtype
+    pyramid_quantized_dtype = quantization.pyramid_quantized_dtype
+    raw_quantization = quantization.raw_quantization
+    level_quantization = quantization.level_quantization
+
     n_samples, n_channels = source.shape
 
     # Compute strides
@@ -374,19 +354,9 @@ def add_pyramid(
     sampling_frequency: float | None = None,
     units: str = "uV",
     raw_path: str = "raw",
-    chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG,
-    base_stride: int = BASE_STRIDE,
-    stride_factor: int = STRIDE_FACTOR,
-    min_top_blocks: int = MIN_TOP_BLOCKS,
-    compressor: str | BytesBytesCodec = "blosc",
-    consolidate_metadata: bool = True,
-    quantize: bool = False,
-    pyramid_quantized_dtype: str = "uint8",
-    level_quantization: LevelQuantization | None = None,
+    config: BuildConfig = DEFAULT_BUILD_CONFIG,
+    quantization: QuantizationConfig = DEFAULT_QUANTIZATION_CONFIG,
     progress: ProgressCallback | None = None,
-    lsb_shift_raw: int | str = "auto",
-    lsb_shift_pyramid: int | str = "auto",
-    noise_floor: float | None = None,
 ) -> None:
     """Build pyramid levels for an existing raw Zarr store.
 
@@ -400,41 +370,41 @@ def add_pyramid(
         Path to existing Zarr store containing the raw data array.
     output : str or Path
         Filesystem path for the pyramid-only output store.
-    sampling_frequency : float
-        Sampling rate in Hz.
-    units : str
-        Physical units of the data (e.g. ``"uV"``).
+    sampling_frequency : float or None, optional
+        Sampling rate in Hz.  If ``None``, auto-detected from store
+        attributes.
+    units : str, optional
+        Physical units of the data (e.g. ``"uV"``), by default ``"uV"``.
     raw_path : str, optional
         Path to the raw array within *raw_store*, by default ``"raw"``.
         Override for stores with non-standard layouts.
-    chunk_config : ChunkConfig, optional
-        Chunk/shard configuration, by default :data:`DEFAULT_CHUNK_CONFIG`.
-    base_stride : int, optional
-        Base stride for the finest pyramid level, by default 32.
-    stride_factor : int, optional
-        Multiplicative factor between levels, by default 8.
-    min_top_blocks : int, optional
-        Minimum blocks at the coarsest level, by default 1024.
-    compressor : str or Codec, optional
-        Compressor preset (``"blosc"``, ``"gzip"``, ``"zstd"``) or a
-        zarr ``Codec`` instance, by default ``"blosc"``.
-    consolidate_metadata : bool, optional
-        Write consolidated metadata for faster store opens, by default
-        ``True``.
-    quantize : bool, optional
-        Quantize pyramid levels to *pyramid_quantized_dtype*, by default
-        ``False``.
-    pyramid_quantized_dtype : str, optional
-        Target dtype for quantized pyramid data, by default ``"uint8"``.
-    level_quantization : LevelQuantization or None, optional
-        User-provided quantization params.  If ``None`` and *quantize*
-        is ``True``, auto-computed from finest level statistics.
+    config : BuildConfig, optional
+        Build configuration for pyramid geometry, chunking, compression,
+        and LSB-shift settings, by default :data:`DEFAULT_BUILD_CONFIG`.
+    quantization : QuantizationConfig, optional
+        Quantization configuration for pyramid data,
+        by default :data:`DEFAULT_QUANTIZATION_CONFIG`.
 
     Raises
     ------
     ValueError
         If the recording is too short for any pyramid level.
     """
+    # Unpack config
+    chunk_config = config.chunk_config
+    base_stride = config.base_stride
+    stride_factor = config.stride_factor
+    min_top_blocks = config.min_top_blocks
+    compressor = config.compressor
+    consolidate_metadata = config.consolidate_metadata
+    lsb_shift_pyramid = config.lsb_shift_pyramid
+    noise_floor = config.noise_floor
+
+    # Unpack quantization
+    quantize = quantization.quantize
+    pyramid_quantized_dtype = quantization.pyramid_quantized_dtype
+    level_quantization = quantization.level_quantization
+
     # Open source store and read raw array metadata
     src_root = _open_store(raw_store, mode="r")
     raw_array: zarr.Array = _find_raw_array(src_root, raw_path)
@@ -689,18 +659,8 @@ def ensure_pyramid(
     sampling_frequency: float | None = None,
     units: str = "uV",
     raw_path: str = "raw",
-    chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG,
-    base_stride: int = BASE_STRIDE,
-    stride_factor: int = STRIDE_FACTOR,
-    min_top_blocks: int = MIN_TOP_BLOCKS,
-    compressor: str | BytesBytesCodec = "blosc",
-    consolidate_metadata: bool = True,
-    quantize: bool = False,
-    pyramid_quantized_dtype: str = "uint8",
-    level_quantization: LevelQuantization | None = None,
-    lsb_shift_raw: int | str = "auto",
-    lsb_shift_pyramid: int | str = "auto",
-    noise_floor: float | None = None,
+    config: BuildConfig = DEFAULT_BUILD_CONFIG,
+    quantization: QuantizationConfig = DEFAULT_QUANTIZATION_CONFIG,
 ) -> MipmapStore:
     """Ensure a pyramid store exists for the given raw data, building if needed.
 
@@ -714,32 +674,19 @@ def ensure_pyramid(
         Path to existing Zarr store containing the raw data array.
     output : str or Path
         Filesystem path for the pyramid-only output store.
-    sampling_frequency : float
-        Sampling rate in Hz.
-    units : str
-        Physical units of the data (e.g. ``"uV"``).
+    sampling_frequency : float or None, optional
+        Sampling rate in Hz.  If ``None``, auto-detected from store
+        attributes.
+    units : str, optional
+        Physical units of the data (e.g. ``"uV"``), by default ``"uV"``.
     raw_path : str, optional
         Path to the raw array within *raw_store*, by default ``"raw"``.
-    chunk_config : ChunkConfig, optional
-        Chunk/shard configuration, by default :data:`DEFAULT_CHUNK_CONFIG`.
-    base_stride : int, optional
-        Base stride for the finest pyramid level, by default 32.
-    stride_factor : int, optional
-        Multiplicative factor between levels, by default 8.
-    min_top_blocks : int, optional
-        Minimum blocks at the coarsest level, by default 1024.
-    compressor : str or Codec, optional
-        Compressor preset (``"blosc"``, ``"gzip"``, ``"zstd"``) or a
-        zarr ``Codec`` instance, by default ``"blosc"``.
-    consolidate_metadata : bool, optional
-        Write consolidated metadata for faster store opens, by default
-        ``True``.
-    quantize : bool, optional
-        Quantize pyramid levels, by default ``False``.
-    pyramid_quantized_dtype : str, optional
-        Target dtype for quantized pyramid data, by default ``"uint8"``.
-    level_quantization : LevelQuantization or None, optional
-        User-provided quantization params for pyramid levels.
+    config : BuildConfig, optional
+        Build configuration for pyramid geometry, chunking, compression,
+        and LSB-shift settings, by default :data:`DEFAULT_BUILD_CONFIG`.
+    quantization : QuantizationConfig, optional
+        Quantization configuration for pyramid data,
+        by default :data:`DEFAULT_QUANTIZATION_CONFIG`.
 
     Returns
     -------
@@ -752,6 +699,11 @@ def ensure_pyramid(
         If the recording is too short for any pyramid level.
     """
     from ecephys_mipmap_zarr.read import open_mipmap
+
+    # Unpack geometry params for stride validation
+    base_stride = config.base_stride
+    stride_factor = config.stride_factor
+    min_top_blocks = config.min_top_blocks
 
     output_path = Path(output)
     needs_build = True
@@ -787,18 +739,8 @@ def ensure_pyramid(
             sampling_frequency=sampling_frequency,
             units=units,
             raw_path=raw_path,
-            chunk_config=chunk_config,
-            base_stride=base_stride,
-            stride_factor=stride_factor,
-            min_top_blocks=min_top_blocks,
-            compressor=compressor,
-            consolidate_metadata=consolidate_metadata,
-            quantize=quantize,
-            pyramid_quantized_dtype=pyramid_quantized_dtype,
-            level_quantization=level_quantization,
-            lsb_shift_raw=lsb_shift_raw,
-            lsb_shift_pyramid=lsb_shift_pyramid,
-            noise_floor=noise_floor,
+            config=config,
+            quantization=quantization,
         )
 
     return open_mipmap(output)
