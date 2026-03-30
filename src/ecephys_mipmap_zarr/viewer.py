@@ -302,7 +302,7 @@ class TraceViewer:
         channels: list[int] | None = None,
         n_channels: int = 32,
         channel_spacing: float = 0.0,
-        channel_order: str | list[int] | None = None,
+        channel_order: str | list[int] | None = "depth",
         width: int = 1200,
         height: int = 800,
         spike_data: SpikeData | None = None,
@@ -955,11 +955,14 @@ def _order_channels(
         locations = store.channel_locations
         if locations is None:
             return channels  # no location data, fall back to index order
-        # Sort by y-position (column 1). Deepest (smallest y) first = top of display.
-        ch_set = set(channels)
-        ch_with_depth = [(ch, float(locations[ch, 1])) for ch in channels if ch < len(locations)]
-        ch_with_depth.sort(key=lambda x: x[1])
-        return [ch for ch, _ in ch_with_depth]
+        # Sort by (y, x) position. Shallowest (largest y) first = top of display,
+        # deepest (smallest y) last = bottom. x as tiebreaker for deterministic
+        # ordering of channels at the same depth.
+        ch_with_pos = [
+            (ch, float(locations[ch, 1]), float(locations[ch, 0])) for ch in channels if ch < len(locations)
+        ]
+        ch_with_pos.sort(key=lambda t: (-t[1], t[2]))  # descending y, ascending x
+        return [ch for ch, _, _ in ch_with_pos]
 
     msg = f"Unknown channel_order: {order!r}. Use 'index', 'depth', or a list of channel indices."
     raise ValueError(msg)
@@ -976,7 +979,7 @@ def view(
     store_or_path: MipmapStore | str | Path,
     channels: list[int] | None = None,
     n_channels: int = 32,
-    channel_order: str | list[int] | None = None,
+    channel_order: str | list[int] | None = "depth",
     spike_data: SpikeData | None = None,
     cache_dir: str | Path | None = None,
     cache_max_gb: float = 10,

@@ -340,6 +340,8 @@ class ViewSettings:
     """Channel indices to display."""
     n_channels: int = 32
     """Number of channels to display."""
+    channel_order: str | None = "depth"
+    """Channel display order: 'depth' (default, by probe position), 'index' (by channel number)."""
     width: int = 1200
     """Figure width in pixels."""
     height: int = 800
@@ -361,6 +363,7 @@ class ViewSettings:
             store,
             channels=self.channels,
             n_channels=self.n_channels,
+            channel_order=self.channel_order,
             width=self.width,
             height=self.height,
         )

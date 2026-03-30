@@ -279,5 +279,6 @@ class TestCLIParsing:
                 "height": 800,
                 "cache_dir": None,
                 "cache_max_gb": 10.0,
+                "channel_order": "depth",
             },
         }
