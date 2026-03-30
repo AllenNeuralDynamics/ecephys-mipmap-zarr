@@ -132,8 +132,8 @@ class TestSelectLevel:
         assert select_level(self.STRIDES, 10000.0) == 2048
 
     def test_mid_zoom(self):
-        """spp=1000: 1000/32=31.25 passes, 1000/256=3.9 fails → stride 32."""
-        assert select_level(self.STRIDES, 1000.0) == 32
+        """spp=1000: 1000/32=31.25 passes, 1000/256=3.9 passes, 1000/2048=0.49 fails → stride 256."""
+        assert select_level(self.STRIDES, 1000.0) == 256
 
     def test_raw_fallback(self):
         """spp=10: 10/32=0.3 fails → None (use raw)."""
@@ -288,6 +288,7 @@ class TestMipmapAttrs:
             "dtype",
             "source_metadata",
             "raw_source",
+            "t_start",
         }
 
     def test_raw_source(self):

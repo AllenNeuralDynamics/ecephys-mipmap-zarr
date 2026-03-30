@@ -192,6 +192,28 @@ def _extract_source_metadata(group: zarr.Group) -> dict[str, Any] | None:
     return metadata if metadata else None
 
 
+def _extract_t_start(group: zarr.Group) -> float | None:
+    """Extract the recording start time from an SI zarr store.
+
+    Reads the first element of ``times_seg0`` if present.
+
+    Parameters
+    ----------
+    group : zarr.Group
+        Source SI zarr store.
+
+    Returns
+    -------
+    float or None
+        Start time in seconds, or ``None`` if not available.
+    """
+    try:
+        times = group["times_seg0"]
+        return float(np.asarray(times[:1])[0])  # type: ignore[index]
+    except (KeyError, IndexError):
+        return None
+
+
 def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
     """Copy channel_ids and properties/location arrays from source to destination.
 

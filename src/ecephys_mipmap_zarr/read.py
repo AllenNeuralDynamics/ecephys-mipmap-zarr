@@ -238,6 +238,11 @@ class MipmapStore:
         return self._attrs.n_channels
 
     @property
+    def t_start(self) -> float:
+        """Recording start time in seconds (0 if not available)."""
+        return self._attrs.t_start if self._attrs.t_start is not None else 0.0
+
+    @property
     def strides(self) -> list[int]:
         """Pyramid stride sequence (ascending)."""
         return self._attrs.strides

@@ -37,8 +37,8 @@ class TestTraceViewerCreation:
         viewer = TraceViewer(store, n_channels=4)
         assert viewer._fig is not None
         assert len(viewer.channels) == 4
-        assert len(viewer._envelope_sources) == 4
-        assert len(viewer._line_sources) == 4
+        assert len(viewer._envelope_glyphs) == 4
+        assert len(viewer._line_glyphs) == 4
 
     def test_default_channels(self, tmp_path):
         store, _ = _make_store(tmp_path, n_channels=4)
@@ -49,7 +49,7 @@ class TestTraceViewerCreation:
         store, _ = _make_store(tmp_path, n_channels=8)
         viewer = TraceViewer(store, channels=[2, 5, 7])
         assert viewer.channels == [2, 5, 7]
-        assert len(viewer._envelope_sources) == 3
+        assert len(viewer._envelope_glyphs) == 3
 
     def test_auto_spacing(self, tmp_path):
         store, _ = _make_store(tmp_path)
@@ -66,29 +66,18 @@ class TestTraceViewerRendering:
     def test_initial_render_has_data(self, tmp_path):
         store, _ = _make_store(tmp_path)
         viewer = TraceViewer(store, n_channels=4)
-        # After initial render, at least one glyph type should be visible with data
-        has_data = False
-        for src in viewer._envelope_sources:
-            if len(src.data["x"]) > 0:
-                has_data = True
-                break
-        if not has_data:
-            for src in viewer._line_sources:
-                if len(src.data["x"]) > 0:
-                    has_data = True
-                    break
-        assert has_data
+        # After initial render, at least one source should have data
+        env_has_data = len(viewer._envelope_source.data.get("x", [])) > 0
+        line_has_data = len(viewer._line_source.data.get("x", [])) > 0
+        assert env_has_data or line_has_data
 
     def test_update_data(self, tmp_path):
         store, _ = _make_store(tmp_path)
         viewer = TraceViewer(store, n_channels=4)
-        # Simulate a range change
         viewer._update_data(0.0, 1.0)
-        # Should have data in sources
-        for src in viewer._envelope_sources + viewer._line_sources:
-            if len(src.data.get("x", [])) > 0:
-                return
-        raise AssertionError("No sources updated after _update_data")
+        env_has_data = len(viewer._envelope_source.data.get("x", [])) > 0
+        line_has_data = len(viewer._line_source.data.get("x", [])) > 0
+        assert env_has_data or line_has_data
 
     def test_set_gain(self, tmp_path):
         store, _ = _make_store(tmp_path)

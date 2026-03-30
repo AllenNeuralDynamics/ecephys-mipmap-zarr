@@ -261,6 +261,10 @@ class MipmapAttrs:
     source_metadata : dict or None
         Optional metadata copied from the source store (e.g. SpikeInterface
         probe geometry, annotations).  ``None`` if no source metadata.
+    t_start : float or None
+        Start time of the recording in seconds (from the acquisition
+        clock or ``times_seg0[0]`` in an SI zarr).  ``None`` if not
+        available.  Used by the viewer to offset the time axis.
     """
 
     sampling_frequency: float
@@ -271,6 +275,7 @@ class MipmapAttrs:
     dtype: str = DEFAULT_DTYPE
     raw_source: str | None = None
     source_metadata: dict[str, Any] | None = None
+    t_start: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict suitable for ``zarr.Group.attrs``.
@@ -302,6 +307,7 @@ class MipmapAttrs:
         """
         raw_source = d.get("raw_source")
         source_metadata = d.get("source_metadata")
+        t_start = d.get("t_start")
         return cls(
             sampling_frequency=float(d["sampling_frequency"]),
             units=str(d["units"]),
@@ -311,6 +317,7 @@ class MipmapAttrs:
             dtype=str(d.get("dtype", DEFAULT_DTYPE)),
             raw_source=str(raw_source) if raw_source is not None else None,
             source_metadata=dict(source_metadata) if source_metadata is not None else None,
+            t_start=float(t_start) if t_start is not None else None,
         )
 
 
@@ -557,7 +564,7 @@ def minmax_path(stride: int) -> str:
 def select_level(
     strides: list[int],
     samples_per_pixel: float,
-    oversample: float = 4.0,
+    oversample: float = 2.0,
 ) -> int | None:
     """Choose the best pyramid level for a given zoom.
 

@@ -12,6 +12,7 @@ Usage::
 
 from __future__ import annotations
 
+import logging
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,8 @@ from bokeh.models import ColumnDataSource, FixedTicker, Range1d
 from bokeh.plotting import figure as bokeh_figure
 
 from ecephys_mipmap_zarr.read import MipmapStore, WindowResult, open_mipmap
+
+log = logging.getLogger(__name__)
 
 __all__ = [
     "SpikeData",
@@ -325,7 +328,7 @@ class TraceViewer:
         else:
             self.channel_spacing = channel_spacing
 
-        # Build Bokeh figure
+        # Viewport state
         self._offsets = self._compute_channel_offsets()
         self._last_x_start = 0.0
         self._last_x_end = 0.0
@@ -335,6 +338,7 @@ class TraceViewer:
         self._fetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fetch")
         self._fetch_future: Future[Any] | None = None
         self._fetch_generation: int = 0  # incremented on each viewport change
+        self._pending_viewport: tuple[float, float] | None = None
 
         # Prefetch for remote stores — warm adjacent shards in background
         self._prefetch_executor: ThreadPoolExecutor | None = (
@@ -342,16 +346,25 @@ class TraceViewer:
         )
         self._prefetch_futures: list[Future[Any]] = []
 
+        # Build figure + Panel layout (figure pane is swappable)
+        self._spike_data = spike_data
         self._build_figure()
-
-        # Create spike overlay if spike data provided
-        self._spike_overlay: SpikeOverlay | None = None
-        if spike_data is not None:
-            self._spike_overlay = SpikeOverlay(
-                self._fig, spike_data, self._offsets, self.channel_spacing, self.channels
-            )
+        self._fig_pane = pn.pane.Bokeh(self._fig)
+        self._controls = self._build_controls()
+        self._layout = pn.Row(self._fig_pane, self._controls)
 
         self._initial_render()
+
+    def _display_to_samples(self, x_start: float, x_end: float) -> tuple[int, int]:
+        """Convert display-time range to clamped sample indices."""
+        fs = self.store.sampling_frequency
+        t0 = max(0, int((x_start - self.store.t_start) * fs))
+        t1 = min(self.store.n_samples, int((x_end - self.store.t_start) * fs))
+        return t0, t1
+
+    def _samples_to_display(self, sample: int) -> float:
+        """Convert a sample index to display time."""
+        return sample / self.store.sampling_frequency + self.store.t_start
 
     def _compute_channel_spacing(self) -> float:
         """Auto-compute channel spacing from a data sample."""
@@ -372,13 +385,13 @@ class TraceViewer:
 
     def _build_figure(self) -> None:
         """Create the Bokeh figure with glyphs and sources."""
-        fs = self.store.sampling_frequency
-        duration = self.store.n_samples / fs
+        t_start = self._samples_to_display(0)
+        t_end = self._samples_to_display(self.store.n_samples)
 
         self._fig = bokeh_figure(
             width=self.width,
             height=self.height,
-            x_range=Range1d(0, duration),
+            x_range=Range1d(t_start, t_end),
             y_range=Range1d(
                 float(self._offsets[-1] - self.channel_spacing),
                 float(self._offsets[0] + self.channel_spacing),
@@ -397,41 +410,76 @@ class TraceViewer:
             for i in range(len(self.channels))
         }
 
-        # Create sources and glyphs for each channel
-        self._envelope_sources: list[ColumnDataSource] = []
-        self._line_sources: list[ColumnDataSource] = []
+        # Single source per display mode — one websocket push per render
+        n_ch = len(self.channels)
+        colors = _channel_colors(n_ch)
+
+        # Envelope source: columns x, y1_0, y2_0, y1_1, y2_1, ...
+        env_data: dict[str, list[Any]] = {"x": []}
+        for i in range(n_ch):
+            env_data[f"y1_{i}"] = []
+            env_data[f"y2_{i}"] = []
+        self._envelope_source = ColumnDataSource(data=env_data)
+
         self._envelope_glyphs: list[Any] = []
+        for i in range(n_ch):
+            g = self._fig.varea(
+                x="x",
+                y1=f"y1_{i}",
+                y2=f"y2_{i}",
+                source=self._envelope_source,
+                fill_alpha=0.7,
+                color=colors[i],
+            )
+            g.visible = False
+            self._envelope_glyphs.append(g)
+
+        # Line source: columns x, y_0, y_1, ...
+        line_data: dict[str, list[Any]] = {"x": []}
+        for i in range(n_ch):
+            line_data[f"y_{i}"] = []
+        self._line_source = ColumnDataSource(data=line_data)
+
         self._line_glyphs: list[Any] = []
-
-        colors = _channel_colors(len(self.channels))
-
-        for i in range(len(self.channels)):
-            # Envelope source (varea)
-            env_src = ColumnDataSource(data={"x": [], "y1": [], "y2": []})
-            env_glyph = self._fig.varea(x="x", y1="y1", y2="y2", source=env_src, fill_alpha=0.7, color=colors[i])
-            env_glyph.visible = False
-            self._envelope_sources.append(env_src)
-            self._envelope_glyphs.append(env_glyph)
-
-            # Line source
-            line_src = ColumnDataSource(data={"x": [], "y": []})
-            line_glyph = self._fig.line(x="x", y="y", source=line_src, line_width=0.5, color=colors[i])
-            line_glyph.visible = False
-            self._line_sources.append(line_src)
-            self._line_glyphs.append(line_glyph)
+        for i in range(n_ch):
+            g = self._fig.line(
+                x="x",
+                y=f"y_{i}",
+                source=self._line_source,
+                line_width=0.5,
+                color=colors[i],
+            )
+            g.visible = False
+            self._line_glyphs.append(g)
 
         # Register range change callback
         self._fig.x_range.on_change("start", self._on_range_change)  # type: ignore[arg-type]
         self._fig.x_range.on_change("end", self._on_range_change)  # type: ignore[arg-type]
 
+        # Create spike overlay if spike data provided
+        self._spike_overlay: SpikeOverlay | None = None
+        if self._spike_data is not None:
+            self._spike_overlay = SpikeOverlay(
+                self._fig, self._spike_data, self._offsets, self.channel_spacing, self.channels
+            )
+
     def _initial_render(self) -> None:
         """Render the initial view (full recording)."""
-        self._update_data(0.0, self.store.n_samples / self.store.sampling_frequency)
+        t_start = self._samples_to_display(0)
+        t_end = self._samples_to_display(self.store.n_samples)
+        self._update_data(t_start, t_end)
 
     def _on_range_change(self, attr: str, old: Any, new: Any) -> None:
-        """Handle Bokeh x_range change events."""
+        """Handle Bokeh x_range change events.
+
+        Submits a non-blocking fetch.  If a fetch is already in flight,
+        the viewport is saved and picked up when the current fetch
+        completes — naturally throttling to one fetch at a time while
+        keeping panning smooth.
+        """
         x_start = float(self._fig.x_range.start)  # type: ignore[arg-type]
         x_end = float(self._fig.x_range.end)  # type: ignore[arg-type]
+        log.debug("range_change: x=[%.2f, %.2f]", x_start, x_end)
 
         # Threshold skip: ignore if < 1% change
         width = x_end - x_start
@@ -453,35 +501,94 @@ class TraceViewer:
         render is scheduled back on the Bokeh document's event loop via
         ``add_next_tick_callback``.  Stale fetches (superseded by a
         newer viewport change) are discarded on completion.
+
+        If a fetch is already in flight, it is not cancelled but the
+        desired viewport is saved.  When the in-flight fetch completes
+        (and finds its generation stale), a new fetch is automatically
+        submitted for the latest desired viewport.
         """
-        fs = self.store.sampling_frequency
-        t0 = max(0, int(x_start * fs))
-        t1 = min(self.store.n_samples, int(x_end * fs))
+        t0, t1 = self._display_to_samples(x_start, x_end)
         if t0 >= t1:
+            log.debug("request_update: empty window t0=%d t1=%d, skipping", t0, t1)
             return
 
-        # Increment generation to invalidate in-flight fetches
+        # Skip if a fetch is already running — save the desired viewport
+        # so we can re-submit when the current one finishes.
+        if self._fetch_future is not None and not self._fetch_future.done():
+            log.debug("request_update: fetch in flight, saving pending viewport")
+            self._pending_viewport = (x_start, x_end)
+            return
+        self._pending_viewport = None
+
+        # Increment generation only when actually submitting a fetch
         self._fetch_generation += 1
         gen = self._fetch_generation
+        log.debug("request_update: submitting fetch gen=%d t0=%d t1=%d", gen, t0, t1)
 
         def _fetch_and_render() -> None:
-            result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
+            import time
 
-            # Check if this fetch is still current
-            if gen != self._fetch_generation:
-                return  # superseded by a newer viewport change
+            t_start_fetch = time.perf_counter()
+            result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
+            t_fetched = time.perf_counter()
+            log.debug(
+                "fetch gen=%d: %.1fms, %s shape=%s",
+                gen,
+                (t_fetched - t_start_fetch) * 1000,
+                "raw" if result.is_raw else f"s{result.stride}",
+                result.data.shape,
+            )
+
+            # Mark fetch as done before checking pending, so
+            # _request_update won't see us as "in flight".
+            self._fetch_future = None
+
+            # If user panned while we were fetching, skip render and
+            # fetch the latest viewport instead.
+            pending = self._pending_viewport
+            if pending is not None:
+                log.debug("fetch gen=%d: pending viewport, skipping", gen)
+                self._pending_viewport = None
+                self._request_update(*pending)
+                return
+
+            # Prepare display data on this thread (downsampling + dict building)
+            # so _apply only does the source assignment on the event loop.
+            display = self._prepare_display_data(result)
+            t_prepared = time.perf_counter()
+            log.debug(
+                "fetch gen=%d: prepare %.1fms, %d points",
+                gen,
+                (t_prepared - t_fetched) * 1000,
+                len(display["data"]["x"]),
+            )
 
             def _apply() -> None:
-                if gen != self._fetch_generation:
-                    return  # double-check in case of race
+                import time as _time
 
+                if gen != self._fetch_generation:
+                    log.debug("apply gen=%d: stale (current=%d), skipping", gen, self._fetch_generation)
+                    return
+
+                t_apply_start = _time.perf_counter()
                 self._last_x_start = x_start
                 self._last_x_end = x_end
 
-                if result.is_raw:
-                    self._render_raw(result)
+                # Apply pre-computed display data (single source assignment)
+                use_envelope = display["mode"] == "envelope"
+                if self._last_was_raw is not (not use_envelope):
+                    for i in range(len(self.channels)):
+                        self._envelope_glyphs[i].visible = use_envelope
+                        self._line_glyphs[i].visible = not use_envelope
+
+                if use_envelope:
+                    self._envelope_source.data = display["data"]
                 else:
-                    self._render_envelope(result)
+                    self._line_source.data = display["data"]
+                self._last_was_raw = not use_envelope
+                log.debug(
+                    "apply gen=%d: %.1fms, mode=%s", gen, (_time.perf_counter() - t_apply_start) * 1000, display["mode"]
+                )
 
                 # Update spike overlay
                 if self._spike_overlay is not None:
@@ -501,11 +608,13 @@ class TraceViewer:
             # Schedule render on Bokeh's event loop (thread-safe)
             doc = self._fig.document
             if doc is not None:
+                log.debug("fetch gen=%d: scheduling _apply via add_next_tick_callback", gen)
                 doc.add_next_tick_callback(_apply)
             else:
-                _apply()  # no document yet (e.g. initial render before serve)
+                log.debug("fetch gen=%d: no document, calling _apply directly", gen)
+                _apply()
 
-        self._fetch_executor.submit(_fetch_and_render)
+        self._fetch_future = self._fetch_executor.submit(_fetch_and_render)
 
     def _update_data(self, x_start: float, x_end: float) -> None:
         """Fetch data and update all sources (blocking).
@@ -514,21 +623,27 @@ class TraceViewer:
         available.  After that, :meth:`_request_update` is used for
         non-blocking updates.
         """
-        fs = self.store.sampling_frequency
-        t0 = max(0, int(x_start * fs))
-        t1 = min(self.store.n_samples, int(x_end * fs))
+        t0, t1 = self._display_to_samples(x_start, x_end)
         if t0 >= t1:
             return
 
         result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
+        display = self._prepare_display_data(result)
 
         self._last_x_start = x_start
         self._last_x_end = x_end
 
-        if result.is_raw:
-            self._render_raw(result)
+        use_envelope = display["mode"] == "envelope"
+        if self._last_was_raw is not (not use_envelope):
+            for i in range(len(self.channels)):
+                self._envelope_glyphs[i].visible = use_envelope
+                self._line_glyphs[i].visible = not use_envelope
+
+        if use_envelope:
+            self._envelope_source.data = display["data"]
         else:
-            self._render_envelope(result)
+            self._line_source.data = display["data"]
+        self._last_was_raw = not use_envelope
 
         # Update spike overlay
         if self._spike_overlay is not None:
@@ -559,7 +674,6 @@ class TraceViewer:
             f.cancel()
         self._prefetch_futures.clear()
 
-        fs = self.store.sampling_frequency
         width = x_end - x_start
 
         # Detect pan direction from center shift
@@ -570,8 +684,7 @@ class TraceViewer:
         else:
             adj_start = x_start - width  # panning left — prefetch left
 
-        adj_t0 = max(0, int(adj_start * fs))
-        adj_t1 = min(self.store.n_samples, int((adj_start + width) * fs))
+        adj_t0, adj_t1 = self._display_to_samples(adj_start, adj_start + width)
         if adj_t0 >= adj_t1:
             return
 
@@ -588,7 +701,7 @@ class TraceViewer:
         if mm_array.shards is None:
             return  # no sharding — can't prefetch by shard
         shard_blocks = mm_array.shards[2]  # block-axis shard size
-        cur_t0 = int(x_start * fs)
+        cur_t0, _ = self._display_to_samples(x_start, x_end)
         cur_shard = (cur_t0 // plan.stride) // shard_blocks
         adj_shard = plan.block_start // shard_blocks
 
@@ -603,42 +716,86 @@ class TraceViewer:
 
         self._prefetch_futures.append(self._prefetch_executor.submit(_warm))
 
-    def _render_envelope(self, result: WindowResult) -> None:
-        """Update sources for envelope (minmax) display."""
-        fs = self.store.sampling_frequency
+    def _prepare_display_data(self, result: WindowResult) -> dict[str, Any]:
+        """Prepare downsampled display data dict on the fetch thread.
+
+        Returns a dict with ``mode`` (``"envelope"`` or ``"line"``) and
+        ``data`` (the ColumnDataSource dict ready for assignment).
+        """
+        if result.is_raw:
+            return self._prepare_raw_display(result)
+        return self._prepare_envelope_display(result)
+
+    def _prepare_envelope_display(self, result: WindowResult) -> dict[str, Any]:
+        """Prepare envelope display data, downsampling if needed."""
         stride = result.stride
         assert stride is not None
-        n_blocks = result.data.shape[2]  # (C, 2, B)
-        x = (np.arange(n_blocks) * stride + result.t0_actual) / fs
+        data = result.data  # (C, 2, B)
+        n_blocks = data.shape[2]
 
+        # Downsample to ~2x pixel width by re-bucketing min/max
+        max_blocks = self.width * 2
+        effective_stride = stride
+        if n_blocks > max_blocks:
+            bucket_size = n_blocks // max_blocks
+            n_full = (n_blocks // bucket_size) * bucket_size
+            full = data[:, :, :n_full].reshape(data.shape[0], 2, -1, bucket_size)
+            mins = full[:, 0, :, :].min(axis=2)
+            maxs = full[:, 1, :, :].max(axis=2)
+            if n_full < n_blocks:
+                tail = data[:, :, n_full:]
+                tail_min = tail[:, 0, :].min(axis=1, keepdims=True)
+                tail_max = tail[:, 1, :].max(axis=1, keepdims=True)
+                mins = np.concatenate([mins, tail_min], axis=1)
+                maxs = np.concatenate([maxs, tail_max], axis=1)
+            data = np.stack([mins, maxs], axis=1)
+            n_blocks = data.shape[2]
+            effective_stride = stride * bucket_size
+
+        sample_indices = np.arange(n_blocks) * effective_stride + result.t0_actual
+        x = sample_indices / self.store.sampling_frequency + self.store.t_start
+
+        new_data: dict[str, Any] = {"x": x}
         for i in range(len(self.channels)):
-            offset = self._offsets[i]
-            self._envelope_sources[i].data = {
-                "x": x,
-                "y1": result.data[i, 0, :] + offset,
-                "y2": result.data[i, 1, :] + offset,
-            }
-            self._envelope_glyphs[i].visible = True
-            self._line_glyphs[i].visible = False
+            new_data[f"y1_{i}"] = data[i, 0, :] + self._offsets[i]
+            new_data[f"y2_{i}"] = data[i, 1, :] + self._offsets[i]
+        return {"mode": "envelope", "data": new_data}
 
-        self._last_was_raw = False
+    def _prepare_raw_display(self, result: WindowResult) -> dict[str, Any]:
+        """Prepare raw display data, switching to envelope if too many points."""
+        data = result.data
+        n_samples = data.shape[1]
+        max_points = self.width * 2
 
-    def _render_raw(self, result: WindowResult) -> None:
-        """Update sources for raw trace display."""
-        fs = self.store.sampling_frequency
-        n_samples = result.data.shape[1]  # (C, T)
-        x = np.linspace(result.t0_actual / fs, result.t1_actual / fs, n_samples)
+        if n_samples <= max_points:
+            x = np.linspace(
+                self._samples_to_display(result.t0_actual),
+                self._samples_to_display(result.t1_actual),
+                n_samples,
+            )
+            new_data: dict[str, Any] = {"x": x}
+            for i in range(len(self.channels)):
+                new_data[f"y_{i}"] = data[i, :] + self._offsets[i]
+            return {"mode": "line", "data": new_data}
 
+        # Too many points — min/max bucket into envelope
+        bucket_size = n_samples // self.width
+        n_full = (n_samples // bucket_size) * bucket_size
+        full = data[:, :n_full].reshape(data.shape[0], -1, bucket_size)
+        mins = full.min(axis=2)
+        maxs = full.max(axis=2)
+        n_buckets = mins.shape[1]
+
+        x = np.linspace(
+            self._samples_to_display(result.t0_actual),
+            self._samples_to_display(result.t0_actual + n_full),
+            n_buckets,
+        )
+        new_data = {"x": x}
         for i in range(len(self.channels)):
-            offset = self._offsets[i]
-            self._line_sources[i].data = {
-                "x": x,
-                "y": result.data[i, :] + offset,
-            }
-            self._line_glyphs[i].visible = True
-            self._envelope_glyphs[i].visible = False
-
-        self._last_was_raw = True
+            new_data[f"y1_{i}"] = mins[i, :] + self._offsets[i]
+            new_data[f"y2_{i}"] = maxs[i, :] + self._offsets[i]
+        return {"mode": "envelope", "data": new_data}
 
     def _update_layout(self) -> None:
         """Recompute offsets and y-range after spacing/gain change."""
@@ -658,15 +815,36 @@ class TraceViewer:
     def set_channels(self, channels: list[int]) -> None:
         """Change which channels are displayed.
 
+        Rebuilds the Bokeh figure and swaps it into the Panel pane,
+        preserving the current time viewport.
+
         Parameters
         ----------
         channels : list[int]
             New channel indices.
         """
+        # Invalidate any in-flight fetches (they have the wrong channel count)
+        self._fetch_generation += 1
+        self._pending_viewport = None
+
+        # Preserve current viewport
+        x_start = float(self._fig.x_range.start)  # type: ignore[arg-type]
+        x_end = float(self._fig.x_range.end)  # type: ignore[arg-type]
+
         self.channels = list(channels)
         self._offsets = self._compute_channel_offsets()
+        self._last_was_raw = None  # force visibility reset
         self._build_figure()
-        self._initial_render()
+
+        # Restore viewport
+        self._fig.x_range.start = x_start  # type: ignore[assignment]
+        self._fig.x_range.end = x_end  # type: ignore[assignment]
+
+        # Swap figure into the Panel pane
+        self._fig_pane.object = self._fig
+
+        # Render with preserved viewport (blocking — need correct data before display)
+        self._update_data(x_start, x_end)
 
     def set_gain(self, gain: float) -> None:
         """Change the amplitude gain (channel spacing multiplier).
@@ -679,13 +857,8 @@ class TraceViewer:
         self._gain = gain
         self._update_layout()
 
-    def panel(self) -> pn.Column:
-        """Return a Panel layout with the figure and controls.
-
-        Returns
-        -------
-        pn.Column
-        """
+    def _build_controls(self) -> pn.Column:
+        """Build the control panel widgets."""
         max_ch = self.store.n_channels - 1
 
         channel_start = pn.widgets.IntSlider(
@@ -723,8 +896,16 @@ class TraceViewer:
         n_visible.param.watch(_on_channel_change, "value")
         gain_slider.param.watch(_on_gain_change, "value")
 
-        controls = pn.Column(channel_start, n_visible, gain_slider, width=250)
-        return pn.Row(self._fig, controls)
+        return pn.Column(channel_start, n_visible, gain_slider, width=250)
+
+    def panel(self) -> pn.Row:
+        """Return the Panel layout with the figure and controls.
+
+        Returns
+        -------
+        pn.Row
+        """
+        return self._layout
 
     def show(self, **kwargs: Any) -> None:
         """Launch the viewer in a browser tab.

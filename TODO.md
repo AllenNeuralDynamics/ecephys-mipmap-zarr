@@ -311,42 +311,46 @@ Save the current viewport as PNG or SVG.
 - [ ] Use `bokeh.io.export_png` or `export_svgs` (requires selenium or playwright)
 - [ ] Or simpler: Bokeh's built-in save tool (already available in toolbar)
 
-## Store-layer caching (fsspec)
+## ~~Store-layer caching (fsspec)~~ DONE
 
-Add `cache_dir` parameter to `open_mipmap()` to configure fsspec's `filecache` protocol for S3 stores. This gives persistent, cross-session shard caching at the zarr store layer with no library complexity.
+Implemented: auto `cache_dir` for remote URIs (cross-platform: XDG on Linux, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows). LRU pruning with configurable `cache_max_gb` (default 10 GB). Wired through `open_mipmap()`, `view()`, CLI `--cache-dir`/`--cache-max-gb`.
 
-```python
-store = open_mipmap("s3://bucket/store.zarr", cache_dir="/tmp/zarr_cache")
-```
+## ~~Viewer shard prefetch~~ DONE
 
-### Implementation tasks
-- [ ] Add `cache_dir: str | Path | None` parameter to `open_mipmap()` and `_open_store()`
-- [ ] When `cache_dir` is set and protocol is remote, wrap with fsspec `filecache`
-- [ ] Add `--cache-dir` to CLI `view` and `add-pyramid` commands
-- [ ] Document the caching pattern in README/CLAUDE.md
+Implemented: after rendering, detect pan direction and submit minimal background read from adjacent shard to warm fsspec cache. Shard-aware (skips if same shard). Cancel stale prefetches on viewport change. `ThreadPoolExecutor(max_workers=1)`. Only active for remote stores.
 
-## Viewer prefetching and RAM cache
+## ~~Non-blocking viewer data fetches~~ DONE
 
-Build on the ReadPlan primitives to add responsive panning for the viewer. Two layers:
+Implemented: viewport changes submit data fetches to background thread. Render scheduled back on Bokeh event loop via `add_next_tick_callback`. Generation counter discards stale fetches. Initial render stays synchronous.
 
-### Layer 1: RAM LRU cache (~500 MB)
-- `dict[ReadPlan, WindowResult]` keyed by plan (which is hashable)
-- Cache non-dequantized results (compact int8/uint16), dequantize on render
-- LRU eviction by total array bytes
+## 2D channel+time panning
 
-### Layer 2: Threaded prefetch
-- On viewport change, `plan_window()` for current + adjacent viewports
-- Check RAM cache → submit `execute_plan()` to thread pool on miss
-- Cancel stale prefetches when user pans rapidly (only latest viewport matters)
-- Use `concurrent.futures.ThreadPoolExecutor` (Panel-compatible)
+Currently channels are controlled by discrete sliders. The viewer should support 2D panning — x-axis pans in time (already works), y-axis pans in channels. Scrolling vertically should dynamically load channels, like the x-axis loads different pyramid levels on zoom.
+
+### Design
+
+- Map y-axis pan/scroll to channel index changes
+- Dynamically load channels as user scrolls vertically
+- Data fetch changes channel selection, not just time window
+- Smooth scrolling through all channels without discrete slider steps
+- Keep current slider as a secondary control / overview indicator
 
 ### Implementation tasks
-- [ ] Add `ViewportCache` class to viewer (LRU dict, byte-budget eviction)
-- [ ] Integrate `plan_window()` + `execute_plan(dequantize=False)` into viewer update
-- [ ] Add prefetch for adjacent viewports (left/right at same level)
-- [ ] Add prefetch for one finer level (zoom-in prediction)
-- [ ] Thread pool for background fetches with cancellation
-- [ ] `dequantize()` at render time from cached compact results
+- [ ] Add y-axis pan tool to Bokeh figure
+- [ ] Map y-range changes to channel selection updates
+- [ ] Fetch new channels on vertical pan (reuse `_request_update` pattern)
+- [ ] Update channel labels on vertical pan
+- [ ] Clamp to valid channel range
+
+## Absolute time axis
+
+The x-axis currently shows seconds from recording start (0 to duration). If the source recording has a real start time, display absolute timestamps.
+
+### Implementation tasks
+- [ ] Add `start_time: str | None` field to `MipmapAttrs` (ISO 8601)
+- [ ] Copy start time from SI zarr attrs during `build_mipmap` / `add_pyramid`
+- [ ] Viewer: display absolute timestamps on x-axis when available
+- [ ] Fall back to relative seconds when no start time
 
 ## ~~Evaluate codebase structure~~ DONE
 

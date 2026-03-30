@@ -41,6 +41,7 @@ from ecephys_mipmap_zarr._store import (
     _apply_adc_quantization,
     _copy_source_arrays,
     _extract_source_metadata,
+    _extract_t_start,
     _find_raw_array,
     _open_store,
 )
@@ -344,9 +345,11 @@ def build_mipmap(
 
     # Copy source metadata if requested
     source_metadata: dict[str, Any] | None = None
+    t_start: float | None = None
     if metadata_from is not None:
         meta_root = _open_store(metadata_from, mode="r")
         source_metadata = _extract_source_metadata(meta_root)
+        t_start = _extract_t_start(meta_root)
         _copy_source_arrays(meta_root, root)
 
         # Store ADC gain/offset as RawQuantization if available
@@ -362,6 +365,7 @@ def build_mipmap(
         n_channels=n_channels,
         dtype=dtype,
         source_metadata=source_metadata,
+        t_start=t_start,
     )
     root.attrs.update(attrs.to_dict())
 
@@ -709,6 +713,7 @@ def add_pyramid(
 
     # Extract source metadata (probe, annotations) if available
     source_metadata = _extract_source_metadata(src_root)
+    t_start = _extract_t_start(src_root)
 
     # Copy channel_ids and properties/location arrays if present
     _copy_source_arrays(src_root, out_root)
@@ -723,6 +728,7 @@ def add_pyramid(
         dtype=raw_dtype,
         raw_source=str(raw_store),
         source_metadata=source_metadata,
+        t_start=t_start,
     )
     out_root.attrs.update(attrs.to_dict())
 

@@ -22,7 +22,29 @@ Core dependencies: zarr, numpy, dask.
 - **Raw array**: `(channels, samples)` — channel-first, one channel's time series is contiguous in memory. 4-9% better compression than (T,C), faster writes.
 - **Pyramid arrays**: `(channels, 2, n_blocks)` — axis 1 is `[min, max]`, time-like axis last, dtype defaults to raw dtype
 - **Source data is (T, C)**: builder transposes internally. SI zarrs and `.cbin` files are (T, C) — the transpose happens at write time.
-- **Root attrs** (`MipmapAttrs`): sampling_frequency, units, strides, n_samples, n_channels, dtype
+- **Root attrs** (`MipmapAttrs`): sampling_frequency, units, strides, n_samples, n_channels, dtype, t_start
+
+### SpikeInterface zarr v2 layout (source data)
+
+AIND raw recordings are stored as SI zarr v2 stores (not v3). The builder reads from these via `metadata_from`. Structure:
+
+```
+/                              # root group (zarr v2, use fsspec.get_mapper)
+  attrs: sampling_frequency, num_segments, probe, annotations, provenance
+/traces_seg0                   # shape (T, C), int16 — raw ADC values
+/times_seg0                    # shape (T,), float64 — per-sample timestamps (seconds, acquisition clock)
+/channel_ids                   # shape (C,), string — channel ID labels
+/properties/
+  gain_to_uV                   # shape (C,), float64 — ADC-to-µV gain per channel
+  offset_to_uV                 # shape (C,), float64 — ADC-to-µV offset per channel
+  location                     # shape (C, 2), float64 — probe (x, y) positions
+```
+
+Key details:
+- `times_seg0[0]` gives `t_start` (recording start in acquisition clock seconds)
+- `gain_to_uV` / `offset_to_uV` → stored as `RawQuantization` in our mipmap store
+- `traces_seg0` is (T, C) — our builder transposes to (C, T)
+- Open with `zarr.open_group(fsspec.get_mapper("s3://..."), mode="r")` (zarr v2 API)
 
 ### Dtype and quantization
 

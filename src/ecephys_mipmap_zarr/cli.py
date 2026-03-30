@@ -377,6 +377,13 @@ CLICommand = Union[  # noqa: UP007 — Union required for tyro.cli() type resolu
 
 def main() -> None:
     """CLI entry point."""
+    import os
+
+    if os.environ.get("ECEPHYS_MIPMAP_DEBUG"):
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
+
     try:
         command = tyro.cli(
             CLICommand,
