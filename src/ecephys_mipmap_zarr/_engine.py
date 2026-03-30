@@ -107,11 +107,51 @@ def _convert_array_to_int8(
         Whether this is a pyramid array.
     """
     old_arr: zarr.Array = root[path]  # type: ignore[assignment]
-    data = np.asarray(old_arr[:]).astype(np.int8)
     shape = old_arr.shape
     old_attrs = dict(old_arr.attrs)
 
+    # Write int8 to a temporary path — can't read old_arr after deleting it.
+    tmp_path = path + "__int8_tmp"
+    tmp_arr = _create_zarr_array(
+        root,
+        tmp_path,
+        shape=shape,
+        dtype="int8",
+        chunks=chunks,
+        shards=shards,
+        compressor=compressor,
+        entropy=entropy,
+        is_pyramid=is_pyramid,
+    )
+
+    # Chunked copy to avoid loading entire array into memory.
+    last_axis = len(shape) - 1
+    shard_len = shards[last_axis]
+    total = shape[last_axis]
+    for i0 in range(0, total, shard_len):
+        i1 = min(i0 + shard_len, total)
+        if last_axis == 1:
+            tmp_arr[:, i0:i1] = np.asarray(old_arr[:, i0:i1]).astype(np.int8)
+        else:
+            tmp_arr[:, :, i0:i1] = np.asarray(old_arr[:, :, i0:i1]).astype(np.int8)
+
+    if old_attrs:
+        tmp_arr.attrs.update(old_attrs)
+
+    # Replace: delete old int16, rename tmp directory to final path.
+    # zarr v3 has no rename API, so we use the local store directly.
     del root[path]
+    store = root.store
+    if hasattr(store, "root"):
+        # LocalStore — rename directory on disk
+        import shutil
+
+        src_dir = store.root / tmp_path
+        dst_dir = store.root / path
+        if src_dir.exists():
+            shutil.move(str(src_dir), str(dst_dir))
+            return
+    # Fallback for non-local stores: copy from tmp to final path
     new_arr = _create_zarr_array(
         root,
         path,
@@ -123,9 +163,15 @@ def _convert_array_to_int8(
         entropy=entropy,
         is_pyramid=is_pyramid,
     )
-    new_arr[:] = data
+    for i0 in range(0, total, shard_len):
+        i1 = min(i0 + shard_len, total)
+        if last_axis == 1:
+            new_arr[:, i0:i1] = np.asarray(tmp_arr[:, i0:i1])
+        else:
+            new_arr[:, :, i0:i1] = np.asarray(tmp_arr[:, :, i0:i1])
     if old_attrs:
         new_arr.attrs.update(old_attrs)
+    del root[tmp_path]
 
 
 def _clip_and_convert_to_int8(
@@ -160,11 +206,49 @@ def _clip_and_convert_to_int8(
         Whether this is a pyramid array.
     """
     old_arr: zarr.Array = root[path]  # type: ignore[assignment]
-    data = np.clip(np.asarray(old_arr[:]), -128, 127).astype(np.int8)
     shape = old_arr.shape
     old_attrs = dict(old_arr.attrs)
 
+    # Write clipped int8 to a temporary path — can't read old_arr after deleting it.
+    tmp_path = path + "__int8_tmp"
+    tmp_arr = _create_zarr_array(
+        root,
+        tmp_path,
+        shape=shape,
+        dtype="int8",
+        chunks=chunks,
+        shards=shards,
+        compressor=compressor,
+        entropy=entropy,
+        is_pyramid=is_pyramid,
+    )
+
+    # Chunked clip + copy to avoid loading entire array into memory.
+    last_axis = len(shape) - 1
+    shard_len = shards[last_axis]
+    total = shape[last_axis]
+    for i0 in range(0, total, shard_len):
+        i1 = min(i0 + shard_len, total)
+        if last_axis == 1:
+            tmp_arr[:, i0:i1] = np.clip(np.asarray(old_arr[:, i0:i1]), -128, 127).astype(np.int8)
+        else:
+            tmp_arr[:, :, i0:i1] = np.clip(np.asarray(old_arr[:, :, i0:i1]), -128, 127).astype(np.int8)
+
+    if old_attrs:
+        tmp_arr.attrs.update(old_attrs)
+
+    # Replace: delete old int16, rename tmp directory to final path.
     del root[path]
+    store = root.store
+    if hasattr(store, "root"):
+        import shutil
+
+        src_dir = store.root / tmp_path
+        dst_dir = store.root / path
+        if src_dir.exists():
+            shutil.move(str(src_dir), str(dst_dir))
+            return
+    # Fallback for non-local stores
     new_arr = _create_zarr_array(
         root,
         path,
@@ -176,9 +260,15 @@ def _clip_and_convert_to_int8(
         entropy=entropy,
         is_pyramid=is_pyramid,
     )
-    new_arr[:] = data
+    for i0 in range(0, total, shard_len):
+        i1 = min(i0 + shard_len, total)
+        if last_axis == 1:
+            new_arr[:, i0:i1] = np.asarray(tmp_arr[:, i0:i1])
+        else:
+            new_arr[:, :, i0:i1] = np.asarray(tmp_arr[:, :, i0:i1])
     if old_attrs:
         new_arr.attrs.update(old_attrs)
+    del root[tmp_path]
 
 
 def _resolve_compressor(

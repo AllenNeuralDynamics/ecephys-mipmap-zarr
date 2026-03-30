@@ -190,10 +190,21 @@ def build_mipmap(
             compressor=compressor,
         )
 
-        s32_blocks_result = _write_raw_and_compute_finest(
+        # Write s32 directly to zarr during the pass (no in-memory collection)
+        finest_array = _create_zarr_array(
+            root,
+            minmax_path(finest_stride).lstrip("/"),
+            shape=(n_channels, 2, finest_n_blocks),
+            dtype=dtype,
+            chunks=cfg.minmax_chunk,
+            shards=cfg.minmax_shard,
+            compressor=compressor,
+        )
+
+        _write_raw_and_compute_finest(
             source,
             raw_array,
-            None,
+            finest_array,
             shard_samples=cfg.raw_shard[1],
             base_stride=finest_stride,
             n_samples=n_samples,
@@ -202,12 +213,9 @@ def build_mipmap(
             progress=progress,
             prefetch_chunks=config.prefetch_chunks,
         )
-        assert isinstance(s32_blocks_result, list)  # no shift in quantized path
-
-        all_s32 = np.concatenate(s32_blocks_result, axis=2)
 
         if do_quantize_pyramids:
-            # Compute level quantization from s32 stats
+            # Compute level quantization from accumulated stats
             if level_quantization is None:
                 min_offset, min_scale = compute_quantization_params(
                     stats.mm_min_min,
@@ -228,41 +236,47 @@ def build_mipmap(
                     quantized_dtype=pyramid_quantized_dtype,
                 )
 
-            # Quantize s32 blocks and write
+            # Requantize s32 in-place: read chunks from zarr, quantize, write back
             lq_min_offset = np.array(level_quantization.min_offset)
             lq_max_offset = np.array(level_quantization.max_offset)
             lq_scale = np.array(level_quantization.scale)
 
-            q_mins = quantize_array(all_s32[:, 0, :], lq_min_offset, lq_scale, pyramid_quantized_dtype)  # (C, B)
-            q_maxs = quantize_array(all_s32[:, 1, :], lq_max_offset, lq_scale, pyramid_quantized_dtype)  # (C, B)
-            q_s32 = np.stack([q_mins, q_maxs], axis=1)
-
-            mm_dtype = pyramid_quantized_dtype
-            finest_array = _create_zarr_array(
+            # Replace finest array with quantized dtype
+            q_finest = _create_zarr_array(
                 root,
-                minmax_path(finest_stride).lstrip("/"),
+                minmax_path(finest_stride).lstrip("/") + "__q_tmp",
                 shape=(n_channels, 2, finest_n_blocks),
-                dtype=mm_dtype,
+                dtype=pyramid_quantized_dtype,
                 chunks=cfg.minmax_chunk,
                 shards=cfg.minmax_shard,
                 compressor=compressor,
                 quantized=True,
             )
-            finest_array[:] = q_s32
+
+            shard_blocks = cfg.minmax_shard[2]
+            for b0 in range(0, finest_n_blocks, shard_blocks):
+                b1 = min(b0 + shard_blocks, finest_n_blocks)
+                s32_chunk = np.asarray(finest_array[:, :, b0:b1])
+                q_mins = quantize_array(s32_chunk[:, 0, :], lq_min_offset, lq_scale, pyramid_quantized_dtype)
+                q_maxs = quantize_array(s32_chunk[:, 1, :], lq_max_offset, lq_scale, pyramid_quantized_dtype)
+                q_finest[:, :, b0:b1] = np.stack([q_mins, q_maxs], axis=1)
+
+            # Swap tmp → final
+            mm_path = minmax_path(finest_stride).lstrip("/")
+            del root[mm_path]
+            store = root.store
+            if hasattr(store, "root"):
+                import shutil
+
+                shutil.move(str(store.root / (mm_path + "__q_tmp")), str(store.root / mm_path))
+                finest_array = root[mm_path]  # type: ignore[assignment]
+            else:
+                finest_array = q_finest
+
+            mm_dtype = pyramid_quantized_dtype
             finest_array.attrs.update({"quantization": level_quantization.to_dict()})
         else:
-            # Write s32 in source dtype (no pyramid quantization)
             mm_dtype = dtype
-            finest_array = _create_zarr_array(
-                root,
-                minmax_path(finest_stride).lstrip("/"),
-                shape=(n_channels, 2, finest_n_blocks),
-                dtype=mm_dtype,
-                chunks=cfg.minmax_chunk,
-                shards=cfg.minmax_shard,
-                compressor=compressor,
-            )
-            finest_array[:] = all_s32
 
         # Cascade
         _build_cascade_levels(
@@ -448,12 +462,22 @@ def add_pyramid(
     finest_n_blocks = n_blocks(n_samples, finest_stride)
 
     if quantize:
-        # Collect s32 blocks in memory + accumulate stats
+        # Write s32 directly to zarr during the pass + accumulate stats
         stats = _AccumulatedStats.create(n_channels, raw_dtype)
 
-        s32_blocks = _build_finest_from_raw(
+        finest_array = _create_zarr_array(
+            out_root,
+            minmax_path(finest_stride).lstrip("/"),
+            shape=(n_channels, 2, finest_n_blocks),
+            dtype=raw_dtype,
+            chunks=cfg.minmax_chunk,
+            shards=cfg.minmax_shard,
+            compressor=compressor,
+        )
+
+        _build_finest_from_raw(
             raw_array,
-            None,
+            finest_array,
             shard_samples=cfg.raw_shard[1],
             base_stride=finest_stride,
             n_samples=n_samples,
@@ -462,7 +486,7 @@ def add_pyramid(
             prefetch_chunks=config.prefetch_chunks,
         )
 
-        # Compute level quantization
+        # Compute level quantization from accumulated stats
         if level_quantization is None:
             min_offset, min_scale = compute_quantization_params(
                 stats.mm_min_min,
@@ -483,19 +507,15 @@ def add_pyramid(
                 quantized_dtype=pyramid_quantized_dtype,
             )
 
-        # Quantize and write s32
+        # Requantize s32 in-place: read chunks from zarr, quantize, write to new array
         lq_min_offset = np.array(level_quantization.min_offset)
         lq_max_offset = np.array(level_quantization.max_offset)
         lq_scale = np.array(level_quantization.scale)
 
-        all_s32 = np.concatenate(s32_blocks, axis=2)
-        q_mins = quantize_array(all_s32[:, 0, :], lq_min_offset, lq_scale, pyramid_quantized_dtype)
-        q_maxs = quantize_array(all_s32[:, 1, :], lq_max_offset, lq_scale, pyramid_quantized_dtype)
-        q_s32 = np.stack([q_mins, q_maxs], axis=1)
-
-        finest_array = _create_zarr_array(
+        mm_path = minmax_path(finest_stride).lstrip("/")
+        q_finest = _create_zarr_array(
             out_root,
-            minmax_path(finest_stride).lstrip("/"),
+            mm_path + "__q_tmp",
             shape=(n_channels, 2, finest_n_blocks),
             dtype=pyramid_quantized_dtype,
             chunks=cfg.minmax_chunk,
@@ -503,7 +523,25 @@ def add_pyramid(
             compressor=compressor,
             quantized=True,
         )
-        finest_array[:] = q_s32
+
+        shard_blocks = cfg.minmax_shard[2]
+        for b0 in range(0, finest_n_blocks, shard_blocks):
+            b1 = min(b0 + shard_blocks, finest_n_blocks)
+            s32_chunk = np.asarray(finest_array[:, :, b0:b1])
+            q_mins = quantize_array(s32_chunk[:, 0, :], lq_min_offset, lq_scale, pyramid_quantized_dtype)
+            q_maxs = quantize_array(s32_chunk[:, 1, :], lq_max_offset, lq_scale, pyramid_quantized_dtype)
+            q_finest[:, :, b0:b1] = np.stack([q_mins, q_maxs], axis=1)
+
+        # Swap tmp → final
+        del out_root[mm_path]
+        store = out_root.store
+        if hasattr(store, "root"):
+            import shutil
+
+            shutil.move(str(store.root / (mm_path + "__q_tmp")), str(store.root / mm_path))
+            finest_array = out_root[mm_path]  # type: ignore[assignment]
+        else:
+            finest_array = q_finest
         finest_array.attrs.update({"quantization": level_quantization.to_dict()})
 
         # Cascade on uint8

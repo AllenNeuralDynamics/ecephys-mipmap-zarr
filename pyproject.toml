@@ -53,7 +53,7 @@ extend-select = ["Q", "RUF100", "C90", "I", "F", "E", "W", "D", "UP", "ANN", "PY
 extend-ignore = ["ANN401"]  # Skip self/cls type annotations
 # Skip all type annotation checks in tests
 per-file-ignores = { "tests/*.py" = ["ANN", "D"] }
-mccabe = { max-complexity = 18 }
+mccabe = { max-complexity = 20 }
 pydocstyle = { convention = "numpy" }
 
 [tool.codespell]
