@@ -12,6 +12,7 @@ Usage::
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -330,6 +331,12 @@ class TraceViewer:
         self._last_x_end = 0.0
         self._last_was_raw: bool | None = None
 
+        # Prefetch for remote stores — warm adjacent shards in background
+        self._prefetch_executor: ThreadPoolExecutor | None = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch") if store.is_remote else None
+        )
+        self._prefetch_futures: list[Future[Any]] = []
+
         self._build_figure()
 
         # Create spike overlay if spike data provided
@@ -462,6 +469,68 @@ class TraceViewer:
                 raw_result=result if result.is_raw else None,
                 fs=self.store.sampling_frequency,
             )
+
+        # Prefetch adjacent shard for remote stores
+        if self._prefetch_executor is not None:
+            self._prefetch_adjacent(x_start, x_end)
+
+    def _prefetch_adjacent(self, x_start: float, x_end: float) -> None:
+        """Warm the fsspec cache for the shard adjacent to the pan direction.
+
+        Submits a minimal read (1 element) from the next shard in the
+        pan direction.  With fsspec ``filecache``, this triggers the
+        full shard file download, making subsequent reads local.
+        """
+        assert self._prefetch_executor is not None
+
+        # Cancel stale prefetches
+        for f in self._prefetch_futures:
+            f.cancel()
+        self._prefetch_futures.clear()
+
+        fs = self.store.sampling_frequency
+        width = x_end - x_start
+
+        # Detect pan direction from center shift
+        last_center = (self._last_x_start + self._last_x_end) / 2
+        cur_center = (x_start + x_end) / 2
+        if cur_center >= last_center:
+            adj_start = x_end  # panning right — prefetch right
+        else:
+            adj_start = x_start - width  # panning left — prefetch left
+
+        adj_t0 = max(0, int(adj_start * fs))
+        adj_t1 = min(self.store.n_samples, int((adj_start + width) * fs))
+        if adj_t0 >= adj_t1:
+            return
+
+        # Plan adjacent viewport to find which level/blocks
+        try:
+            plan = self.store.plan_window(adj_t0, adj_t1, num_points=self.width)
+        except (ValueError, RuntimeError):
+            return  # out of bounds or raw unavailable
+        if plan.stride is None or plan.block_start is None:
+            return  # raw level — shards too large to prefetch
+
+        # Check if adjacent falls in a different shard
+        mm_array = self.store._minmax_arrays[plan.stride]
+        if mm_array.shards is None:
+            return  # no sharding — can't prefetch by shard
+        shard_blocks = mm_array.shards[2]  # block-axis shard size
+        cur_t0 = int(x_start * fs)
+        cur_shard = (cur_t0 // plan.stride) // shard_blocks
+        adj_shard = plan.block_start // shard_blocks
+
+        if adj_shard == cur_shard:
+            return  # same shard — already cached
+
+        # Minimal read to trigger shard download
+        touch_block = min(adj_shard * shard_blocks, mm_array.shape[2] - 1)
+
+        def _warm() -> None:
+            _ = np.asarray(mm_array[:1, :1, touch_block : touch_block + 1])
+
+        self._prefetch_futures.append(self._prefetch_executor.submit(_warm))
 
     def _render_envelope(self, result: WindowResult) -> None:
         """Update sources for envelope (minmax) display."""
