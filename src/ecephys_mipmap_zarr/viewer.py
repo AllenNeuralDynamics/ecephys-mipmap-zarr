@@ -312,21 +312,28 @@ class TraceViewer:
         self.height = height
         self._gain = 1.0
 
-        # Resolve channels
-        if channels is None:
-            n_ch = min(n_channels, store.n_channels)
-            channels_resolved = list(range(n_ch))
-        else:
-            channels_resolved = list(channels)
+        # Cache channel_ids to avoid repeated zarr reads during panning
+        self._channel_ids = store.channel_ids
 
-        # Apply channel ordering
-        self.channels = _order_channels(channels_resolved, channel_order, store)
+        # Resolve channels:
+        # _all_channels = scrollable set (all store channels, or --channels subset)
+        # self.channels = currently visible subset (first n_channels of _all_channels)
+        if channels is None:
+            all_ch = list(range(store.n_channels))
+        else:
+            all_ch = list(channels)
+        self._all_channels = _order_channels(all_ch, channel_order, store)
+        n_visible = min(n_channels, len(self._all_channels))
+        self.channels = list(self._all_channels[:n_visible])
 
         # Compute spacing
         if channel_spacing <= 0:
             self.channel_spacing = self._compute_channel_spacing()
         else:
             self.channel_spacing = channel_spacing
+
+        # All-channel y-positions (for mapping y_range to channel indices)
+        self._all_offsets = np.arange(len(self._all_channels), dtype=np.float64) * -self.channel_spacing
 
         # Viewport state
         self._offsets = self._compute_channel_offsets()
@@ -339,6 +346,12 @@ class TraceViewer:
         self._fetch_future: Future[Any] | None = None
         self._fetch_generation: int = 0  # incremented on each viewport change
         self._pending_viewport: tuple[float, float] | None = None
+
+        # Debounce timer for grouping x+y range changes into a single update.
+        # During diagonal panning, Bokeh fires 4 separate callbacks (x start,
+        # x end, y start, y end).  We schedule a single deferred update that
+        # reads the final state after all callbacks have fired.
+        self._update_scheduled: bool = False
 
         # Prefetch for remote stores — warm adjacent shards in background
         self._prefetch_executor: ThreadPoolExecutor | None = (
@@ -380,8 +393,14 @@ class TraceViewer:
         return median_range * 1.5 if median_range > 0 else 1.0
 
     def _compute_channel_offsets(self) -> npt.NDArray[Any]:
-        """Compute y-offsets for each channel (top-to-bottom)."""
-        return np.arange(len(self.channels), dtype=np.float64) * -self.channel_spacing * self._gain
+        """Compute y-offsets for the currently visible channels.
+
+        Looks up each visible channel's position in ``_all_offsets`` so
+        that y-positions are consistent when panning through channels.
+        """
+        ch_to_idx = {ch: i for i, ch in enumerate(self._all_channels)}
+        indices = [ch_to_idx[ch] for ch in self.channels if ch in ch_to_idx]
+        return self._all_offsets[indices]
 
     def _build_figure(self) -> None:
         """Create the Bokeh figure with glyphs and sources."""
@@ -395,15 +414,19 @@ class TraceViewer:
             y_range=Range1d(
                 float(self._offsets[-1] - self.channel_spacing),
                 float(self._offsets[0] + self.channel_spacing),
+                bounds=(
+                    float(self._all_offsets[-1] - self.channel_spacing),
+                    float(self._all_offsets[0] + self.channel_spacing),
+                ),
             ),
-            tools="xpan,xwheel_zoom,reset",
+            tools="pan,xwheel_zoom,reset",
             active_scroll="xwheel_zoom",
-            active_drag="xpan",
+            active_drag="pan",
         )
         self._fig.xaxis.axis_label = "Time (s)"
 
-        # Channel labels on y-axis — use channel_ids if available
-        ch_ids = self.store.channel_ids
+        # Channel labels on y-axis — use cached channel_ids if available
+        ch_ids = self._channel_ids
         self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())
         self._fig.yaxis.major_label_overrides = {
             float(self._offsets[i]): (str(ch_ids[self.channels[i]]) if ch_ids is not None else str(self.channels[i]))
@@ -452,9 +475,11 @@ class TraceViewer:
             g.visible = False
             self._line_glyphs.append(g)
 
-        # Register range change callback
+        # Register range change callbacks
         self._fig.x_range.on_change("start", self._on_range_change)  # type: ignore[arg-type]
         self._fig.x_range.on_change("end", self._on_range_change)  # type: ignore[arg-type]
+        self._fig.y_range.on_change("start", self._on_y_range_change)  # type: ignore[arg-type]
+        self._fig.y_range.on_change("end", self._on_y_range_change)  # type: ignore[arg-type]
 
         # Create spike overlay if spike data provided
         self._spike_overlay: SpikeOverlay | None = None
@@ -469,28 +494,115 @@ class TraceViewer:
         t_end = self._samples_to_display(self.store.n_samples)
         self._update_data(t_start, t_end)
 
-    def _on_range_change(self, attr: str, old: Any, new: Any) -> None:
-        """Handle Bokeh x_range change events.
+    def _on_y_range_change(self, attr: str, old: Any, new: Any) -> None:
+        """Handle Bokeh y_range change events for channel panning."""
+        self._schedule_viewport_update()
 
-        Submits a non-blocking fetch.  If a fetch is already in flight,
-        the viewport is saved and picked up when the current fetch
-        completes — naturally throttling to one fetch at a time while
-        keeping panning smooth.
+    def _on_range_change(self, attr: str, old: Any, new: Any) -> None:
+        """Handle Bokeh x_range change events."""
+        self._schedule_viewport_update()
+
+    def _schedule_viewport_update(self) -> None:
+        """Schedule a deferred viewport update, grouping rapid x+y changes.
+
+        During diagonal panning, Bokeh fires 4 separate callbacks (x start,
+        x end, y start, y end).  Instead of triggering a fetch for each one,
+        we mark the viewport as dirty and schedule a single callback on the
+        next tick.  By the time the callback runs, all range properties have
+        their final values.
         """
+        if self._update_scheduled:
+            return  # already have a pending update
+        self._update_scheduled = True
+
+        doc = self._fig.document
+        if doc is not None:
+            doc.add_next_tick_callback(self._deferred_viewport_update)
+        else:
+            # No document yet (shouldn't happen for range callbacks, but be safe)
+            self._deferred_viewport_update()
+
+    def _deferred_viewport_update(self) -> None:
+        """Run the actual viewport update after all range changes are batched."""
+        self._update_scheduled = False
+
         x_start = float(self._fig.x_range.start)  # type: ignore[arg-type]
         x_end = float(self._fig.x_range.end)  # type: ignore[arg-type]
-        log.debug("range_change: x=[%.2f, %.2f]", x_start, x_end)
 
-        # Threshold skip: ignore if < 1% change
-        width = x_end - x_start
-        center = (x_start + x_end) / 2.0
-        last_width = self._last_x_end - self._last_x_start
-        last_center = (self._last_x_start + self._last_x_end) / 2.0
-        if last_width > 0:
-            width_change = abs(width - last_width) / last_width
-            center_change = abs(center - last_center) / last_width
-            if width_change < 0.01 and center_change < 0.01:
-                return
+        # --- Handle y-range channel changes ---
+        y_start = float(self._fig.y_range.start)  # type: ignore[arg-type]
+        y_end = float(self._fig.y_range.end)  # type: ignore[arg-type]
+
+        visible_mask = (self._all_offsets >= y_start) & (self._all_offsets <= y_end)
+        visible_indices = np.where(visible_mask)[0]
+
+        channels_changed = False
+        if len(visible_indices) > 0:
+            new_channels = [self._all_channels[i] for i in visible_indices]
+            if new_channels != self.channels:
+                channels_changed = True
+                log.debug(
+                    "viewport_update: y=[%.1f, %.1f], %d channels visible",
+                    y_start, y_end, len(new_channels),
+                )
+                self.channels = new_channels
+                self._offsets = self._all_offsets[visible_indices]
+                self._last_was_raw = None  # force visibility reset
+
+                # Update y-axis labels
+                n_ch = len(self.channels)
+                self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())  # type: ignore[assignment]
+                self._fig.yaxis.major_label_overrides = {  # type: ignore[attr-defined]
+                    float(self._offsets[i]): (
+                        str(self._channel_ids[self.channels[i]])
+                        if self._channel_ids is not None
+                        else str(self.channels[i])
+                    )
+                    for i in range(n_ch)
+                }
+
+                # Grow glyph pool if needed
+                if n_ch > self._max_glyphs:
+                    colors = _channel_colors(n_ch)
+                    for i in range(self._max_glyphs, n_ch):
+                        g = self._fig.varea(
+                            x="x",
+                            y1=f"y1_{i}",
+                            y2=f"y2_{i}",
+                            source=self._envelope_source,
+                            fill_alpha=0.7,
+                            color=colors[i],
+                        )
+                        g.visible = False
+                        self._envelope_glyphs.append(g)
+                        g = self._fig.line(
+                            x="x",
+                            y=f"y_{i}",
+                            source=self._line_source,
+                            line_width=0.5,
+                            color=colors[i],
+                        )
+                        g.visible = False
+                        self._line_glyphs.append(g)
+                    self._max_glyphs = n_ch
+
+                # Hide excess glyphs
+                for i in range(n_ch, self._max_glyphs):
+                    self._envelope_glyphs[i].visible = False
+                    self._line_glyphs[i].visible = False
+
+        # --- Handle x-range changes (threshold skip) ---
+        if not channels_changed:
+            log.debug("viewport_update: x=[%.2f, %.2f]", x_start, x_end)
+            width = x_end - x_start
+            center = (x_start + x_end) / 2.0
+            last_width = self._last_x_end - self._last_x_start
+            last_center = (self._last_x_start + self._last_x_end) / 2.0
+            if last_width > 0:
+                width_change = abs(width - last_width) / last_width
+                center_change = abs(center - last_center) / last_width
+                if width_change < 0.01 and center_change < 0.01:
+                    return
 
         self._request_update(x_start, x_end)
 
@@ -523,13 +635,16 @@ class TraceViewer:
         # Increment generation only when actually submitting a fetch
         self._fetch_generation += 1
         gen = self._fetch_generation
-        log.debug("request_update: submitting fetch gen=%d t0=%d t1=%d", gen, t0, t1)
+        channels = list(self.channels)  # snapshot — channels may change during fetch
+        offsets = self._offsets.copy()
+        gain = self._gain
+        log.debug("request_update: submitting fetch gen=%d t0=%d t1=%d, %d channels", gen, t0, t1, len(channels))
 
         def _fetch_and_render() -> None:
             import time
 
             t_start_fetch = time.perf_counter()
-            result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
+            result = self.store.get_window(t0, t1, channels=channels, num_points=self.width)
             t_fetched = time.perf_counter()
             log.debug(
                 "fetch gen=%d: %.1fms, %s shape=%s",
@@ -554,7 +669,8 @@ class TraceViewer:
 
             # Prepare display data on this thread (downsampling + dict building)
             # so _apply only does the source assignment on the event loop.
-            display = self._prepare_display_data(result)
+            # Use captured channels/offsets/gain — not self.* which may have changed.
+            display = self._prepare_display_data(result, channels=channels, offsets=offsets, gain=gain)
             t_prepared = time.perf_counter()
             log.debug(
                 "fetch gen=%d: prepare %.1fms, %d points",
@@ -629,7 +745,9 @@ class TraceViewer:
             return
 
         result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
-        display = self._prepare_display_data(result)
+        display = self._prepare_display_data(
+            result, channels=list(self.channels), offsets=self._offsets.copy(), gain=self._gain
+        )
 
         self._last_x_start = x_start
         self._last_x_end = x_end
@@ -718,40 +836,50 @@ class TraceViewer:
 
         self._prefetch_futures.append(self._prefetch_executor.submit(_warm))
 
-    def _pad_source_data(self, data: dict[str, Any], mode: str) -> dict[str, Any]:
-        """Pad a source data dict with NaN columns for unused glyph slots.
-
-        NaN values are not rendered by Bokeh, so unused glyphs are
-        invisible even when visible=True.
-        """
-        n_ch = len(self.channels)
+    def _pad_source_data(self, data: dict[str, Any], mode: str, n_channels: int) -> dict[str, Any]:
+        """Pad a source data dict with NaN columns for unused glyph slots."""
         n_points = len(data["x"])
         nans = np.full(n_points, np.nan)
         if mode == "envelope":
-            for i in range(n_ch, self._max_glyphs):
+            for i in range(n_channels, self._max_glyphs):
                 data[f"y1_{i}"] = nans
                 data[f"y2_{i}"] = nans
         else:
-            for i in range(n_ch, self._max_glyphs):
+            for i in range(n_channels, self._max_glyphs):
                 data[f"y_{i}"] = nans
         return data
 
-    def _prepare_display_data(self, result: WindowResult) -> dict[str, Any]:
+    def _prepare_display_data(
+        self,
+        result: WindowResult,
+        *,
+        channels: list[int],
+        offsets: npt.NDArray[Any],
+        gain: float,
+    ) -> dict[str, Any]:
         """Prepare downsampled display data dict on the fetch thread.
 
-        Returns a dict with ``mode`` (``"envelope"`` or ``"line"``) and
-        ``data`` (the ColumnDataSource dict ready for assignment).
+        Uses captured *channels*, *offsets*, and *gain* — not ``self.*``
+        which may have changed during the fetch.
         """
         if result.is_raw:
-            return self._prepare_raw_display(result)
-        return self._prepare_envelope_display(result)
+            return self._prepare_raw_display(result, channels=channels, offsets=offsets, gain=gain)
+        return self._prepare_envelope_display(result, channels=channels, offsets=offsets, gain=gain)
 
-    def _prepare_envelope_display(self, result: WindowResult) -> dict[str, Any]:
+    def _prepare_envelope_display(
+        self,
+        result: WindowResult,
+        *,
+        channels: list[int],
+        offsets: npt.NDArray[Any],
+        gain: float,
+    ) -> dict[str, Any]:
         """Prepare envelope display data, downsampling if needed."""
         stride = result.stride
         assert stride is not None
         data = result.data  # (C, 2, B)
         n_blocks = data.shape[2]
+        n_ch = len(channels)
 
         # Downsample to ~2x pixel width by re-bucketing min/max
         max_blocks = self.width * 2
@@ -776,15 +904,23 @@ class TraceViewer:
         x = sample_indices / self.store.sampling_frequency + self.store.t_start
 
         new_data: dict[str, Any] = {"x": x}
-        for i in range(len(self.channels)):
-            new_data[f"y1_{i}"] = data[i, 0, :] + self._offsets[i]
-            new_data[f"y2_{i}"] = data[i, 1, :] + self._offsets[i]
-        return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope")}
+        for i in range(n_ch):
+            new_data[f"y1_{i}"] = data[i, 0, :] * gain + offsets[i]
+            new_data[f"y2_{i}"] = data[i, 1, :] * gain + offsets[i]
+        return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope", n_ch)}
 
-    def _prepare_raw_display(self, result: WindowResult) -> dict[str, Any]:
+    def _prepare_raw_display(
+        self,
+        result: WindowResult,
+        *,
+        channels: list[int],
+        offsets: npt.NDArray[Any],
+        gain: float,
+    ) -> dict[str, Any]:
         """Prepare raw display data, switching to envelope if too many points."""
         data = result.data
         n_samples = data.shape[1]
+        n_ch = len(channels)
         max_points = self.width * 2
 
         if n_samples <= max_points:
@@ -794,9 +930,9 @@ class TraceViewer:
                 n_samples,
             )
             new_data: dict[str, Any] = {"x": x}
-            for i in range(len(self.channels)):
-                new_data[f"y_{i}"] = data[i, :] + self._offsets[i]
-            return {"mode": "line", "data": self._pad_source_data(new_data, "line")}
+            for i in range(n_ch):
+                new_data[f"y_{i}"] = data[i, :] * gain + offsets[i]
+            return {"mode": "line", "data": self._pad_source_data(new_data, "line", n_ch)}
 
         # Too many points — min/max bucket into envelope
         bucket_size = n_samples // self.width
@@ -812,16 +948,16 @@ class TraceViewer:
             n_buckets,
         )
         new_data = {"x": x}
-        for i in range(len(self.channels)):
-            new_data[f"y1_{i}"] = mins[i, :] + self._offsets[i]
-            new_data[f"y2_{i}"] = maxs[i, :] + self._offsets[i]
-        return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope")}
+        for i in range(n_ch):
+            new_data[f"y1_{i}"] = mins[i, :] * gain + offsets[i]
+            new_data[f"y2_{i}"] = maxs[i, :] * gain + offsets[i]
+        return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope", n_ch)}
 
     def _update_layout(self) -> None:
         """Recompute offsets and y-range after spacing/gain change."""
         self._offsets = self._compute_channel_offsets()
-        self._fig.y_range.start = float(self._offsets[-1] - self.channel_spacing * self._gain)  # type: ignore[assignment]
-        self._fig.y_range.end = float(self._offsets[0] + self.channel_spacing * self._gain)  # type: ignore[assignment]
+        self._fig.y_range.start = float(self._offsets[-1] - self.channel_spacing)  # type: ignore[assignment]
+        self._fig.y_range.end = float(self._offsets[0] + self.channel_spacing)  # type: ignore[assignment]
         self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())  # type: ignore[assignment]
         self._fig.yaxis.major_label_overrides = {
             float(self._offsets[i]): str(self.channels[i]) for i in range(len(self.channels))
@@ -881,10 +1017,13 @@ class TraceViewer:
 
         # Update y-axis labels and range
         n_ch = len(self.channels)
-        ch_ids = self.store.channel_ids
         self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())  # type: ignore[assignment]
         self._fig.yaxis.major_label_overrides = {  # type: ignore[attr-defined]
-            float(self._offsets[i]): (str(ch_ids[self.channels[i]]) if ch_ids is not None else str(self.channels[i]))
+            float(self._offsets[i]): (
+                str(self._channel_ids[self.channels[i]])
+                if self._channel_ids is not None
+                else str(self.channels[i])
+            )
             for i in range(n_ch)
         }
         self._fig.y_range.start = float(self._offsets[-1] - self.channel_spacing)  # type: ignore[union-attr]
@@ -895,10 +1034,10 @@ class TraceViewer:
             self._envelope_glyphs[i].visible = False
             self._line_glyphs[i].visible = False
 
-        # Re-render with current viewport
+        # Re-render with current x viewport (non-blocking)
         x_start = float(self._fig.x_range.start)  # type: ignore[arg-type]
         x_end = float(self._fig.x_range.end)  # type: ignore[arg-type]
-        self._update_data(x_start, x_end)
+        self._request_update(x_start, x_end)
 
     def set_gain(self, gain: float) -> None:
         """Change the amplitude gain (channel spacing multiplier).

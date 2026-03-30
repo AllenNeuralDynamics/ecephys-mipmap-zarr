@@ -83,10 +83,9 @@ class TestTraceViewerRendering:
     def test_set_gain(self, tmp_path):
         store, _ = _make_store(tmp_path)
         viewer = TraceViewer(store, n_channels=4)
-        old_offsets = viewer._offsets.copy()
         viewer.set_gain(2.0)
         assert viewer._gain == 2.0
-        assert not np.array_equal(viewer._offsets, old_offsets)
+        # Gain affects data scaling, not offsets (offsets stay constant)
 
 
 class TestViewFunction:
