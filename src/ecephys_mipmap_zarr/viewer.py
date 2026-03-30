@@ -331,6 +331,11 @@ class TraceViewer:
         self._last_x_end = 0.0
         self._last_was_raw: bool | None = None
 
+        # Background fetch executor — non-blocking data loading
+        self._fetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fetch")
+        self._fetch_future: Future[Any] | None = None
+        self._fetch_generation: int = 0  # incremented on each viewport change
+
         # Prefetch for remote stores — warm adjacent shards in background
         self._prefetch_executor: ThreadPoolExecutor | None = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="prefetch") if store.is_remote else None
@@ -439,10 +444,76 @@ class TraceViewer:
             if width_change < 0.01 and center_change < 0.01:
                 return
 
-        self._update_data(x_start, x_end)
+        self._request_update(x_start, x_end)
+
+    def _request_update(self, x_start: float, x_end: float) -> None:
+        """Submit a non-blocking data fetch for the given viewport.
+
+        The fetch runs in a background thread.  When it completes, the
+        render is scheduled back on the Bokeh document's event loop via
+        ``add_next_tick_callback``.  Stale fetches (superseded by a
+        newer viewport change) are discarded on completion.
+        """
+        fs = self.store.sampling_frequency
+        t0 = max(0, int(x_start * fs))
+        t1 = min(self.store.n_samples, int(x_end * fs))
+        if t0 >= t1:
+            return
+
+        # Increment generation to invalidate in-flight fetches
+        self._fetch_generation += 1
+        gen = self._fetch_generation
+
+        def _fetch_and_render() -> None:
+            result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
+
+            # Check if this fetch is still current
+            if gen != self._fetch_generation:
+                return  # superseded by a newer viewport change
+
+            def _apply() -> None:
+                if gen != self._fetch_generation:
+                    return  # double-check in case of race
+
+                self._last_x_start = x_start
+                self._last_x_end = x_end
+
+                if result.is_raw:
+                    self._render_raw(result)
+                else:
+                    self._render_envelope(result)
+
+                # Update spike overlay
+                if self._spike_overlay is not None:
+                    self._spike_overlay.update(
+                        x_start,
+                        x_end,
+                        self.width,
+                        result.is_raw,
+                        raw_result=result if result.is_raw else None,
+                        fs=self.store.sampling_frequency,
+                    )
+
+                # Prefetch adjacent shard for remote stores
+                if self._prefetch_executor is not None:
+                    self._prefetch_adjacent(x_start, x_end)
+
+            # Schedule render on Bokeh's event loop (thread-safe)
+            doc = self._fig.document
+            if doc is not None:
+                doc.add_next_tick_callback(_apply)
+            else:
+                _apply()  # no document yet (e.g. initial render before serve)
+
+        self._fetch_executor.submit(_fetch_and_render)
 
     def _update_data(self, x_start: float, x_end: float) -> None:
-        """Fetch data and update all sources."""
+        """Fetch data and update all sources (blocking).
+
+        Used for the initial render before the Bokeh document is
+        available.  After that, :meth:`_request_update` is used for
+        non-blocking updates.
+        """
         fs = self.store.sampling_frequency
         t0 = max(0, int(x_start * fs))
         t1 = min(self.store.n_samples, int(x_end * fs))
