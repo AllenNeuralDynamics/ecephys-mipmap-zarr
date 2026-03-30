@@ -815,3 +815,83 @@ class TestWindowResultDequantized:
         """WindowResult.dequantized can be set to False."""
         wr = WindowResult(data=np.zeros((4, 10)), stride=None, t0_actual=0, t1_actual=10, dequantized=False)
         assert wr.dequantized is False
+
+
+class TestPruneCache:
+    """Tests for the _prune_cache function."""
+
+    def test_deletes_oldest_when_over_budget(self, tmp_path):
+        """Oldest files are deleted when cache exceeds budget."""
+        import time
+
+        from ecephys_mipmap_zarr._store import _prune_cache
+
+        # Create files with different mtimes
+        for i in range(5):
+            f = tmp_path / f"file_{i}.dat"
+            f.write_bytes(b"x" * 1000)
+            time.sleep(0.05)  # ensure different mtimes
+
+        # Budget allows 3 files (3000 bytes)
+        _prune_cache(tmp_path, 3000)
+        remaining = sorted(f.name for f in tmp_path.iterdir())
+        assert len(remaining) == 3
+        # Oldest files (file_0, file_1) should be deleted
+        assert "file_0.dat" not in remaining
+        assert "file_1.dat" not in remaining
+
+    def test_no_deletion_when_under_budget(self, tmp_path):
+        """No files deleted when cache is under budget."""
+        from ecephys_mipmap_zarr._store import _prune_cache
+
+        for i in range(3):
+            (tmp_path / f"file_{i}.dat").write_bytes(b"x" * 100)
+
+        _prune_cache(tmp_path, 10000)
+        assert len(list(tmp_path.iterdir())) == 3
+
+    def test_nonexistent_dir(self, tmp_path):
+        """No error when cache dir doesn't exist."""
+        from ecephys_mipmap_zarr._store import _prune_cache
+
+        _prune_cache(tmp_path / "nonexistent", 1000)  # should not raise
+
+
+class TestDefaultCacheDir:
+    """Tests for _default_cache_dir."""
+
+    def test_returns_path(self):
+        """Returns a Path containing 'ecephys-mipmap'."""
+        from pathlib import Path
+
+        from ecephys_mipmap_zarr._store import _default_cache_dir
+
+        result = _default_cache_dir()
+        assert isinstance(result, Path)
+        assert "ecephys-mipmap" in str(result)
+
+    def test_xdg_override(self, monkeypatch, tmp_path):
+        """Respects XDG_CACHE_HOME environment variable."""
+        from ecephys_mipmap_zarr._store import _default_cache_dir
+
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        result = _default_cache_dir()
+        assert result == tmp_path / "ecephys-mipmap"
+
+
+class TestIsRemote:
+    """Tests for MipmapStore.is_remote property."""
+
+    def test_local_store_not_remote(self, tmp_path):
+        """Local store is not remote."""
+        source = np.random.default_rng(42).integers(-500, 500, size=(N_SAMPLES, N_CHANNELS), dtype=np.int16)
+        out = tmp_path / "test.zarr"
+        build_mipmap(
+            source,
+            out,
+            sampling_frequency=30000.0,
+            units="uV",
+            config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
+        )
+        store = open_mipmap(out)
+        assert store.is_remote is False

@@ -658,6 +658,8 @@ def view(
     n_channels: int = 32,
     channel_order: str | list[int] | None = None,
     spike_data: SpikeData | None = None,
+    cache_dir: str | Path | None = None,
+    cache_max_gb: float = 10,
     **kwargs: Any,
 ) -> TraceViewer:
     """Open an interactive trace viewer.
@@ -673,6 +675,10 @@ def view(
     channel_order : str, list[int], or None, optional
         Display order: ``"index"`` (default), ``"depth"`` (by probe
         y-position), or explicit ``list[int]``.
+    cache_dir : str, Path, or None, optional
+        Cache directory for remote stores.  ``None`` auto-detects.
+    cache_max_gb : float, optional
+        Maximum cache size in GB.  Default 10.
     **kwargs
         Passed to :meth:`TraceViewer.show`.
 
@@ -681,7 +687,7 @@ def view(
     TraceViewer
     """
     if not isinstance(store_or_path, MipmapStore):
-        store = open_mipmap(str(store_or_path))
+        store = open_mipmap(str(store_or_path), cache_dir=cache_dir, cache_max_gb=cache_max_gb)
     else:
         store = store_or_path
     viewer = TraceViewer(

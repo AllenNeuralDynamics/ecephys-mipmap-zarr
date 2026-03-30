@@ -39,7 +39,7 @@ import numpy as np
 import numpy.typing as npt
 import zarr
 
-from ecephys_mipmap_zarr._store import _open_store
+from ecephys_mipmap_zarr._store import _default_cache_dir, _open_store
 from ecephys_mipmap_zarr.metadata import (
     LevelQuantization,
     MipmapAttrs,
@@ -262,6 +262,12 @@ class MipmapStore:
     def source_metadata(self) -> dict[str, Any] | None:
         """Source metadata (probe, annotations), or ``None``."""
         return self._attrs.source_metadata
+
+    @property
+    def is_remote(self) -> bool:
+        """Whether the underlying store is backed by a remote filesystem."""
+        store = self._root.store
+        return hasattr(store, "fs")  # FsspecStore has an .fs attribute
 
     def plan_window(
         self,
@@ -589,21 +595,32 @@ class MipmapStore:
         return WindowResult(data=data, stride=stride, t0_actual=t0_actual, t1_actual=t1_actual)
 
 
-def open_mipmap(store_path: str | Path, cache_dir: str | Path | None = None) -> MipmapStore:
+def open_mipmap(
+    store_path: str | Path,
+    cache_dir: str | Path | None = None,
+    cache_max_gb: float = 10,
+) -> MipmapStore:
     """Open a mipmap Zarr store for reading.
 
     Handles both co-located stores (raw + pyramids together) and
     pyramid-only stores (opens ``raw_source`` separately for raw
     fallback).
 
+    For remote URIs (``s3://``, etc.), an fsspec ``filecache`` layer
+    is automatically enabled using the OS-standard cache directory.
+    Override with *cache_dir*, or set ``cache_dir=""`` to disable.
+
     Parameters
     ----------
     store_path : str or Path
         Path to the mipmap Zarr store.
     cache_dir : str, Path, or None, optional
-        When set and *store_path* is a remote URI (contains ``://``),
-        an fsspec ``filecache`` layer is added so that fetched data is
-        persisted locally in *cache_dir*.  Ignored for local paths.
+        Local directory for cached remote data.  ``None`` (default)
+        auto-detects: uses the OS cache directory for remote URIs,
+        disabled for local paths.  Pass ``""`` to explicitly disable.
+    cache_max_gb : float, optional
+        Maximum cache size in GB.  Oldest files are pruned on open.
+        Default 10 GB.
 
     Returns
     -------
@@ -615,11 +632,17 @@ def open_mipmap(store_path: str | Path, cache_dir: str | Path | None = None) -> 
     KeyError
         If required root attributes are missing.
     """
-    root = _open_store(store_path, mode="r", cache_dir=cache_dir)
+    # Auto-default cache_dir for remote URIs
+    if cache_dir is None and "://" in str(store_path):
+        cache_dir = _default_cache_dir()
+    elif cache_dir == "":
+        cache_dir = None  # explicitly disabled
+
+    root = _open_store(store_path, mode="r", cache_dir=cache_dir, cache_max_gb=cache_max_gb)
     attrs = MipmapAttrs.from_dict(dict(root.attrs))
 
     raw_group: zarr.Group | None = None
     if attrs.raw_source is not None:
-        raw_group = _open_store(attrs.raw_source, mode="r", cache_dir=cache_dir)
+        raw_group = _open_store(attrs.raw_source, mode="r", cache_dir=cache_dir, cache_max_gb=cache_max_gb)
 
     return MipmapStore(root, attrs, raw_group=raw_group)

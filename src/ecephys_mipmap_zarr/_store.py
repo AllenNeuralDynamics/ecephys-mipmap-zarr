@@ -5,6 +5,9 @@ Internal module — not part of the public API.
 
 from __future__ import annotations
 
+import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +18,66 @@ from ecephys_mipmap_zarr.metadata import RawQuantization
 
 __all__: list[str] = []  # private module
 
+log = logging.getLogger(__name__)
 
-def _open_store(path: str | Path, mode: str = "r", cache_dir: str | Path | None = None) -> zarr.Group:
+
+def _default_cache_dir() -> Path:
+    """Return the OS-standard cache directory for this package.
+
+    Uses ``XDG_CACHE_HOME`` on Linux, ``~/Library/Caches`` on macOS,
+    and ``%LOCALAPPDATA%`` on Windows.
+    """
+    if xdg := os.environ.get("XDG_CACHE_HOME"):
+        return Path(xdg) / "ecephys-mipmap"
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))
+        return Path(base) / "ecephys-mipmap" / "Cache"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "ecephys-mipmap"
+    return Path.home() / ".cache" / "ecephys-mipmap"
+
+
+def _prune_cache(cache_dir: Path, max_bytes: int) -> None:
+    """Delete oldest files in *cache_dir* until total size is under *max_bytes*.
+
+    Files are sorted by modification time (oldest first).  Pruning runs
+    once per store open, so the cache may briefly exceed the budget
+    between opens.
+    """
+    if not cache_dir.exists():
+        return
+    files = []
+    total = 0
+    for f in cache_dir.rglob("*"):
+        if f.is_file():
+            sz = f.stat().st_size
+            files.append((f.stat().st_mtime, sz, f))
+            total += sz
+
+    if total <= max_bytes:
+        return
+
+    files.sort()  # oldest mtime first
+    deleted = 0
+    for _mtime, sz, f in files:
+        if total <= max_bytes:
+            break
+        try:
+            f.unlink()
+            total -= sz
+            deleted += 1
+        except OSError:
+            pass  # file in use or already gone
+    if deleted:
+        log.info("Pruned %d cached files (%.1f MB freed)", deleted, (total - max_bytes) / 1e6)
+
+
+def _open_store(
+    path: str | Path,
+    mode: str = "r",
+    cache_dir: str | Path | None = None,
+    cache_max_gb: float = 10,
+) -> zarr.Group:
     """Open a zarr store from a local path or remote URI.
 
     Supports ``s3://`` URIs via fsspec (requires the ``s3`` extra).
@@ -31,6 +92,9 @@ def _open_store(path: str | Path, mode: str = "r", cache_dir: str | Path | None 
         When set and *path* is a remote URI, an fsspec ``filecache``
         layer is added so that fetched data is persisted locally.
         Ignored for local paths.
+    cache_max_gb : float, optional
+        Maximum cache size in GB.  Oldest files are pruned on open.
+        Default 10 GB.
 
     Returns
     -------
@@ -45,10 +109,13 @@ def _open_store(path: str | Path, mode: str = "r", cache_dir: str | Path | None 
             raise ImportError(msg) from e
         protocol = path_str.split("://")[0]
         if cache_dir is not None:
+            cache_path = Path(cache_dir)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            _prune_cache(cache_path, int(cache_max_gb * 1024**3))
             fs = fsspec.filesystem(
                 "filecache",
                 target_protocol=protocol,
-                cache_storage=str(cache_dir),
+                cache_storage=str(cache_path),
                 same_names=True,
             )
         else:

@@ -330,13 +330,17 @@ class ViewSettings(BaseSettings):
     n_channels: int = Field(default=32, description="Number of channels to display")
     width: int = Field(default=1200, description="Figure width in pixels")
     height: int = Field(default=800, description="Figure height in pixels")
+    cache_dir: str | None = Field(
+        default=None, description="Cache directory for remote stores (auto-detected if omitted)"
+    )
+    cache_max_gb: float = Field(default=10, description="Maximum cache size in GB")
 
     def cli_cmd(self) -> None:
         """Run the view command."""
         from ecephys_mipmap_zarr.read import open_mipmap
         from ecephys_mipmap_zarr.viewer import TraceViewer
 
-        store = open_mipmap(self.store_path)
+        store = open_mipmap(self.store_path, cache_dir=self.cache_dir, cache_max_gb=self.cache_max_gb)
         console.print(f"Opening viewer: {self.store_path}")
         console.print(f"  {store.n_samples:,} samples, {store.n_channels} channels, {store.sampling_frequency:.0f} Hz")
         viewer = TraceViewer(
