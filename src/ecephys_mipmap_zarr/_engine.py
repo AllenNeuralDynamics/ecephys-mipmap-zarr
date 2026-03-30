@@ -551,9 +551,9 @@ def _write_raw_and_compute_finest(
         # Compute finest min/max from ORIGINAL (unshifted) data
         mm = _compute_minmax_block(chunk, base_stride)
 
-        # Apply shifts
+        # Apply shifts (round-to-nearest via half-step bias, not truncation)
         if lsb_shift_raw > 0:
-            raw_chunk = (chunk >> lsb_shift_raw).astype(np.int16)
+            raw_chunk = ((chunk + (1 << (lsb_shift_raw - 1))) >> lsb_shift_raw).astype(np.int16)
             raw_s_min = min(raw_s_min, int(raw_chunk.min()))
             raw_s_max = max(raw_s_max, int(raw_chunk.max()))
             raw_outliers += int(((raw_chunk < -128) | (raw_chunk > 127)).sum())
@@ -562,7 +562,7 @@ def _write_raw_and_compute_finest(
             raw_chunk = chunk
 
         if lsb_shift_pyramid > 0:
-            mm_shifted = (mm >> lsb_shift_pyramid).astype(np.int16)
+            mm_shifted = ((mm + (1 << (lsb_shift_pyramid - 1))) >> lsb_shift_pyramid).astype(np.int16)
             pyr_s_min = min(pyr_s_min, int(mm_shifted.min()))
             pyr_s_max = max(pyr_s_max, int(mm_shifted.max()))
             pyr_outliers += int(((mm_shifted < -128) | (mm_shifted > 127)).sum())
@@ -858,10 +858,10 @@ def _build_non_quantized(
     raw_entropy: float | None = None
     pyr_entropy: float | None = None
     if raw_shift > 0:
-        raw_entropy = compute_entropy(sample_ct >> raw_shift)
+        raw_entropy = compute_entropy((sample_ct + (1 << (raw_shift - 1))) >> raw_shift)
     if pyr_shift > 0:
         mm_sample = _compute_minmax_block(sample_ct, finest_stride)
-        pyr_entropy = compute_entropy(mm_sample >> pyr_shift)
+        pyr_entropy = compute_entropy((mm_sample + (1 << (pyr_shift - 1))) >> pyr_shift)
 
     # Create arrays
     raw_array = _create_zarr_array(

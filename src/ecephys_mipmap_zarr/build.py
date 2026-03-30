@@ -582,7 +582,7 @@ def add_pyramid(
             else:
                 sample_ct = np.asarray(raw_array[:, 0:n_sample_ent])
             mm_sample = _compute_minmax_block(sample_ct, finest_stride)
-            pyr_entropy = compute_entropy(mm_sample >> pyr_shift)
+            pyr_entropy = compute_entropy((mm_sample + (1 << (pyr_shift - 1))) >> pyr_shift)
 
         if pyr_shift > 0:
             # Collect blocks, shift, then write
@@ -596,7 +596,7 @@ def add_pyramid(
                 prefetch_chunks=config.prefetch_chunks,
             )
             all_s32 = np.concatenate(s32_blocks, axis=2)
-            shifted_s32 = (all_s32 >> pyr_shift).astype(np.int16)
+            shifted_s32 = ((all_s32 + (1 << (pyr_shift - 1))) >> pyr_shift).astype(np.int16)
             pyr_s_min = int(shifted_s32.min())
             pyr_s_max = int(shifted_s32.max())
 
