@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-cli = ["pydantic-settings>=2.0", "rich"]
+cli = ["tyro>=0.8", "rich"]
 viewer = ["panel>=1.0", "bokeh>=3.0", "param"]
 cbin = ["mtscomp"]
 s3 = ["s3fs"]
@@ -45,7 +45,7 @@ dev = [
     "pytest-cov",
     "ruff",
     "interrogate",
-    "pydantic-settings>=2.0",
+    "tyro>=0.8",
     "rich",
     "panel>=1.0",
     "bokeh>=3.0",
@@ -110,7 +110,7 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
 [[tool.mypy.overrides]]
-module = ["zarr.*", "dask.*", "pydantic_settings.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*"]
+module = ["zarr.*", "dask.*", "tyro.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*"]
 ignore_missing_imports = true
 # zarr v3 generics are in flux; suppress type-arg errors in our build module
 [[tool.mypy.overrides]]
@@ -121,4 +121,3 @@ disable_error_code = ["type-arg"]
 module = "ecephys_mipmap_zarr.viewer"
 disallow_untyped_calls = false
 disable_error_code = ["type-arg", "arg-type", "call-arg", "attr-defined", "unused-ignore", "assignment"]
-

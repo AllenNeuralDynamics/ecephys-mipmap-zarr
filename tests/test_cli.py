@@ -1,10 +1,14 @@
 """Tests for ecephys_mipmap_zarr.cli."""
 
+import sys
+
 import numpy as np
+import pytest
 import zarr
 
+from ecephys_mipmap_zarr import cli as cli_module
 from ecephys_mipmap_zarr.build import build_mipmap
-from ecephys_mipmap_zarr.cli import AddPyramidSettings, BuildSettings, InfoSettings
+from ecephys_mipmap_zarr.cli import AddPyramidSettings, BuildSettings, InfoSettings, ViewSettings
 from ecephys_mipmap_zarr.metadata import BuildConfig, ChunkConfig, MipmapAttrs, QuantizationConfig, compute_strides
 
 SMALL_CFG = ChunkConfig(
@@ -13,6 +17,24 @@ SMALL_CFG = ChunkConfig(
     minmax_chunk=(4, 2, 256),
     minmax_shard=(4, 2, 1024),
 )
+
+
+def _parse_cli(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> dict[str, object]:
+    """Run the real CLI parser and capture the parsed subcommand settings."""
+    from dataclasses import asdict
+
+    parsed: dict[str, object] = {}
+
+    def capture(self: BuildSettings | AddPyramidSettings | InfoSettings | ViewSettings) -> None:
+        parsed["type"] = type(self).__name__
+        parsed["data"] = asdict(self)
+
+    for cls in (BuildSettings, AddPyramidSettings, InfoSettings, ViewSettings):
+        monkeypatch.setattr(cls, "cli_cmd", capture)
+
+    monkeypatch.setattr(sys, "argv", argv)
+    cli_module.main()
+    return parsed
 
 
 class TestBuildFromBinary:
@@ -160,3 +182,102 @@ class TestInfoCLI:
 
         settings = InfoSettings(store_path=str(out))
         settings.cli_cmd()  # Should show quantization info without errors
+
+
+class TestCLIParsing:
+    def test_info_accepts_positional_store_path(self, monkeypatch: pytest.MonkeyPatch):
+        parsed = _parse_cli(monkeypatch, ["ecephys-mipmap", "info", "mipmap.zarr"])
+
+        assert parsed == {
+            "type": "InfoSettings",
+            "data": {"store_path": "mipmap.zarr"},
+        }
+
+    def test_info_rejects_named_store_path_flag(self, monkeypatch: pytest.MonkeyPatch):
+        with pytest.raises(SystemExit) as exc_info:
+            _parse_cli(monkeypatch, ["ecephys-mipmap", "info", "--store-path", "mipmap.zarr"])
+
+        assert exc_info.value.code == 2
+
+    def test_build_accepts_bare_quantize_flag(self, monkeypatch: pytest.MonkeyPatch):
+        parsed = _parse_cli(
+            monkeypatch,
+            [
+                "ecephys-mipmap",
+                "build",
+                "--input",
+                "recording.dat",
+                "--output",
+                "mipmap.zarr",
+                "--sampling-frequency",
+                "30000",
+                "--n-samples",
+                "10",
+                "--n-channels",
+                "2",
+                "--quantize",
+            ],
+        )
+
+        assert parsed["type"] == "BuildSettings"
+        assert parsed["data"] == {
+            "input": "recording.dat",
+            "output": "mipmap.zarr",
+            "sampling_frequency": 30000.0,
+            "units": "uV",
+            "n_samples": 10,
+            "n_channels": 2,
+            "dtype": "int16",
+            "raw_path": "raw",
+            "quantize": True,
+            "quantize_pyramids": None,
+            "compressor": "blosc",
+            "metadata_from": None,
+            "lsb_shift_raw": "auto",
+            "lsb_shift_pyramid": "auto",
+            "noise_floor": None,
+            "clip_outliers": True,
+            "prefetch_chunks": 0,
+        }
+
+    def test_build_accepts_no_clip_outliers_flag(self, monkeypatch: pytest.MonkeyPatch):
+        parsed = _parse_cli(
+            monkeypatch,
+            [
+                "ecephys-mipmap",
+                "build",
+                "--input",
+                "recording.dat",
+                "--output",
+                "mipmap.zarr",
+                "--sampling-frequency",
+                "30000",
+                "--n-samples",
+                "10",
+                "--n-channels",
+                "2",
+                "--no-clip-outliers",
+            ],
+        )
+
+        assert parsed["type"] == "BuildSettings"
+        assert parsed["data"]["clip_outliers"] is False
+
+    def test_view_accepts_positional_store_path_and_space_separated_channels(self, monkeypatch: pytest.MonkeyPatch):
+        parsed = _parse_cli(
+            monkeypatch,
+            ["ecephys-mipmap", "view", "mipmap.zarr", "--channels", "1", "2", "3"],
+        )
+
+        assert parsed == {
+            "type": "ViewSettings",
+            "data": {
+                "store_path": "mipmap.zarr",
+                "channels": [1, 2, 3],
+                "n_channels": 32,
+                "width": 1200,
+                "height": 800,
+                "cache_dir": None,
+                "cache_max_gb": 10.0,
+            },
+        }

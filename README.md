@@ -18,7 +18,7 @@ pip install ecephys-mipmap-zarr
 Optional extras:
 
 ```bash
-pip install ecephys-mipmap-zarr[cli]       # CLI (pydantic-settings + rich)
+pip install ecephys-mipmap-zarr[cli]       # CLI (tyro + rich)
 pip install ecephys-mipmap-zarr[viewer]    # Interactive trace viewer (Panel + Bokeh)
 pip install ecephys-mipmap-zarr[cbin]      # mtscomp .cbin support
 pip install ecephys-mipmap-zarr[s3]        # S3 remote zarr access
@@ -119,7 +119,7 @@ ecephys-mipmap add-pyramid \
 ecephys-mipmap info mipmap.zarr
 
 # Launch the viewer
-ecephys-mipmap view --store-path mipmap.zarr
+ecephys-mipmap view mipmap.zarr
 ```
 
 ## Zarr layout

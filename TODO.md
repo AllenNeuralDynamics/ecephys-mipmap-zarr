@@ -293,7 +293,7 @@ Implemented: `ProgressCallback` type alias, `_progress_bar()` context manager wi
 
 ## ~~CLI error handling~~ DONE
 
-Implemented: `main()` wraps `CliApp.run(CLI)` in try/except with `console.print_exception()` and `SystemExit(1)`.
+Implemented: `main()` wraps `tyro.cli(...)` in try/except with `console.print_exception()` and `SystemExit(1)`.
 
 ## Overview minimap
 

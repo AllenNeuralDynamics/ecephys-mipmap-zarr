@@ -664,9 +664,8 @@ class TraceViewer:
             New channel indices.
         """
         self.channels = list(channels)
-        # Rebuild figure with new channels
-        self._build_figure()
         self._offsets = self._compute_channel_offsets()
+        self._build_figure()
         self._initial_render()
 
     def set_gain(self, gain: float) -> None:

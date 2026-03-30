@@ -1,4 +1,4 @@
-r"""CLI entry point using pydantic-settings with subcommands.
+r"""CLI entry point using tyro with subcommands.
 
 Requires the ``cli`` extra::
 
@@ -16,12 +16,12 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Union
 
 import numpy as np
-from pydantic import ConfigDict, Field
-from pydantic_settings import BaseSettings, CliApp, CliSubCommand
+import tyro
 from rich.console import Console
 from rich.table import Table
 
@@ -30,6 +30,7 @@ from ecephys_mipmap_zarr.metadata import BuildConfig, QuantizationConfig
 from ecephys_mipmap_zarr.read import open_mipmap
 
 console = Console()
+PositionalStr = Annotated[str, tyro.conf.Positional]
 
 
 @contextmanager
@@ -106,7 +107,8 @@ def _open_cbin(path: str, sampling_frequency: float | None) -> tuple[Any, str, f
     return reader, dtype, sampling_frequency
 
 
-class BuildSettings(BaseSettings):
+@dataclass
+class BuildSettings:
     """Build a mipmap zarr from a flat binary, cbin, or zarr source.
 
     For flat binary input (``.dat``), provide ``--n-samples``,
@@ -114,38 +116,40 @@ class BuildSettings(BaseSettings):
     these are read from the source automatically.
     """
 
-    input: str = Field(description="Input path: .dat (flat binary), .cbin (mtscomp), or .zarr")
-    output: str = Field(description="Output mipmap zarr store path")
-    sampling_frequency: float | None = Field(default=None, description="Sampling rate in Hz (auto-detected for .cbin)")
-    units: str = Field(default="uV", description="Physical units")
-    n_samples: int | None = Field(default=None, description="Number of samples (required for .dat)")
-    n_channels: int | None = Field(default=None, description="Number of channels (required for .dat)")
-    dtype: str = Field(default="int16", description="Data type (required for .dat)")
-    raw_path: str = Field(default="raw", description="Path to raw array (zarr input only)")
-    quantize: bool = Field(default=False, description="Quantize raw and pyramids (smart: skips raw if already integer)")
-    quantize_pyramids: bool | None = Field(
-        default=None, description="Quantize pyramids to uint8 (overrides --quantize for pyramids)"
-    )
-    compressor: str = Field(default="blosc", description="Compressor preset: blosc, gzip, zstd")
-    metadata_from: str | None = Field(
-        default=None, description="Zarr store (local or S3) to copy probe/channel metadata from"
-    )
-    lsb_shift_raw: int | str = Field(
-        default="auto",
-        description="LSB right-shift for raw data: 'auto' (detect from noise), 0 (lossless), or an integer",
-    )
-    lsb_shift_pyramid: int | str = Field(
-        default="auto",
-        description="LSB right-shift for pyramids: 'auto' (detect, +2 vs raw), 0 (lossless), or an integer",
-    )
-    noise_floor: float | None = Field(
-        default=None,
-        description="Explicit noise floor in ADC RMS units (overrides auto-detection)",
-    )
-    clip_outliers: bool = Field(default=True, description="Clip rare outliers (<0.01%) to fit int8 when LSB-shifting")
-    prefetch_chunks: int = Field(
-        default=0, description="Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)"
-    )
+    input: str
+    """Input path: .dat (flat binary), .cbin (mtscomp), or .zarr."""
+    output: str
+    """Output mipmap zarr store path."""
+    sampling_frequency: float | None = None
+    """Sampling rate in Hz (auto-detected for .cbin)."""
+    units: str = "uV"
+    """Physical units."""
+    n_samples: int | None = None
+    """Number of samples (required for .dat)."""
+    n_channels: int | None = None
+    """Number of channels (required for .dat)."""
+    dtype: str = "int16"
+    """Data type (required for .dat)."""
+    raw_path: str = "raw"
+    """Path to raw array (zarr input only)."""
+    quantize: bool = False
+    """Quantize raw and pyramids (smart: skips raw if already integer)."""
+    quantize_pyramids: bool | None = None
+    """Quantize pyramids to uint8 (overrides --quantize for pyramids)."""
+    compressor: str = "blosc"
+    """Compressor preset: blosc, gzip, zstd."""
+    metadata_from: str | None = None
+    """Zarr store (local or S3) to copy probe/channel metadata from."""
+    lsb_shift_raw: int | str = "auto"
+    """LSB right-shift for raw data: 'auto' (detect from noise), 0 (lossless), or an integer."""
+    lsb_shift_pyramid: int | str = "auto"
+    """LSB right-shift for pyramids: 'auto' (detect, +2 vs raw), 0 (lossless), or an integer."""
+    noise_floor: float | None = None
+    """Explicit noise floor in ADC RMS units (overrides auto-detection)."""
+    clip_outliers: bool = True
+    """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
+    prefetch_chunks: int = 0
+    """Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)."""
 
     def cli_cmd(self) -> None:
         """Run the build command."""
@@ -217,30 +221,32 @@ class BuildSettings(BaseSettings):
         console.print("[green]Done.[/green]")
 
 
-class AddPyramidSettings(BaseSettings):
+@dataclass
+class AddPyramidSettings:
     """Add pyramid levels to an existing zarr, writing to a separate output store."""
 
-    raw_store: str = Field(description="Path or S3 URI to zarr store with raw data")
-    output: str = Field(description="Output pyramid store path")
-    sampling_frequency: float | None = Field(
-        default=None, description="Sampling rate in Hz (auto-detected from zarr attrs if omitted)"
-    )
-    units: str = Field(default="uV", description="Physical units")
-    raw_path: str = Field(default="raw", description="Path to raw array in store")
-    quantize: bool = Field(default=False, description="Quantize pyramids to uint8")
-    compressor: str = Field(default="blosc", description="Compressor preset: blosc, gzip, zstd")
-    lsb_shift_pyramid: int | str = Field(
-        default="auto",
-        description="LSB right-shift for pyramids: 'auto' (detect, +2 vs raw), 0 (lossless), or an integer",
-    )
-    noise_floor: float | None = Field(
-        default=None,
-        description="Explicit noise floor in ADC RMS units (overrides auto-detection)",
-    )
-    clip_outliers: bool = Field(default=True, description="Clip rare outliers (<0.01%) to fit int8 when LSB-shifting")
-    prefetch_chunks: int = Field(
-        default=0, description="Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)"
-    )
+    raw_store: str
+    """Path or S3 URI to zarr store with raw data."""
+    output: str
+    """Output pyramid store path."""
+    sampling_frequency: float | None = None
+    """Sampling rate in Hz (auto-detected from zarr attrs if omitted)."""
+    units: str = "uV"
+    """Physical units."""
+    raw_path: str = "raw"
+    """Path to raw array in store."""
+    quantize: bool = False
+    """Quantize pyramids to uint8."""
+    compressor: str = "blosc"
+    """Compressor preset: blosc, gzip, zstd."""
+    lsb_shift_pyramid: int | str = "auto"
+    """LSB right-shift for pyramids: 'auto' (detect, +2 vs raw), 0 (lossless), or an integer."""
+    noise_floor: float | None = None
+    """Explicit noise floor in ADC RMS units (overrides auto-detection)."""
+    clip_outliers: bool = True
+    """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
+    prefetch_chunks: int = 0
+    """Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)."""
 
     def cli_cmd(self) -> None:
         """Run the add-pyramid command."""
@@ -270,10 +276,12 @@ class AddPyramidSettings(BaseSettings):
         console.print("[green]Done.[/green]")
 
 
-class InfoSettings(BaseSettings):
+@dataclass
+class InfoSettings:
     """Print metadata for a mipmap zarr store."""
 
-    store_path: str = Field(description="Path to mipmap zarr store")
+    store_path: PositionalStr
+    """Path to mipmap zarr store."""
 
     def cli_cmd(self) -> None:
         """Run the info command."""
@@ -322,18 +330,24 @@ class InfoSettings(BaseSettings):
         console.print(table)
 
 
-class ViewSettings(BaseSettings):
+@dataclass
+class ViewSettings:
     """Launch the interactive trace viewer in a browser tab."""
 
-    store_path: str = Field(description="Path to mipmap zarr store")
-    channels: list[int] | None = Field(default=None, description="Channel indices to display")
-    n_channels: int = Field(default=32, description="Number of channels to display")
-    width: int = Field(default=1200, description="Figure width in pixels")
-    height: int = Field(default=800, description="Figure height in pixels")
-    cache_dir: str | None = Field(
-        default=None, description="Cache directory for remote stores (auto-detected if omitted)"
-    )
-    cache_max_gb: float = Field(default=10, description="Maximum cache size in GB")
+    store_path: PositionalStr
+    """Path to mipmap zarr store."""
+    channels: list[int] | None = None
+    """Channel indices to display."""
+    n_channels: int = 32
+    """Number of channels to display."""
+    width: int = 1200
+    """Figure width in pixels."""
+    height: int = 800
+    """Figure height in pixels."""
+    cache_dir: str | None = None
+    """Cache directory for remote stores (auto-detected if omitted)."""
+    cache_max_gb: float = 10
+    """Maximum cache size in GB."""
 
     def cli_cmd(self) -> None:
         """Run the view command."""
@@ -353,22 +367,23 @@ class ViewSettings(BaseSettings):
         viewer.show()
 
 
-class CLI(BaseSettings):
-    """ecephys-mipmap: Build and inspect multi-resolution mipmap zarr stores."""
-
-    model_config = ConfigDict(cli_kebab_case=True)  # type: ignore[assignment,typeddict-unknown-key]
-
-    build: CliSubCommand[BuildSettings]
-    add_pyramid: CliSubCommand[AddPyramidSettings]
-    info: CliSubCommand[InfoSettings]
-    view: CliSubCommand[ViewSettings]
+CLICommand = Union[  # noqa: UP007 — Union required for tyro.cli() type resolution
+    Annotated[BuildSettings, tyro.conf.subcommand(name="build")],
+    Annotated[AddPyramidSettings, tyro.conf.subcommand(name="add-pyramid")],
+    Annotated[InfoSettings, tyro.conf.subcommand(name="info")],
+    Annotated[ViewSettings, tyro.conf.subcommand(name="view")],
+]
 
 
 def main() -> None:
     """CLI entry point."""
     try:
-        model = CliApp.run(CLI)
-        CliApp.run_subcommand(model)
+        command = tyro.cli(
+            CLICommand,
+            prog="ecephys-mipmap",
+            config=(tyro.conf.ConsolidateSubcommandArgs,),
+        )  # type: ignore[call-overload]
+        command.cli_cmd()
     except SystemExit:
         raise
     except Exception:
