@@ -410,19 +410,19 @@ class TraceViewer:
             for i in range(len(self.channels))
         }
 
-        # Single source per display mode — one websocket push per render
-        n_ch = len(self.channels)
-        colors = _channel_colors(n_ch)
+        # Glyphs allocated on demand — start with initial channel count
+        self._max_glyphs = len(self.channels)
+        colors = _channel_colors(self._max_glyphs)
 
         # Envelope source: columns x, y1_0, y2_0, y1_1, y2_1, ...
         env_data: dict[str, list[Any]] = {"x": []}
-        for i in range(n_ch):
+        for i in range(self._max_glyphs):
             env_data[f"y1_{i}"] = []
             env_data[f"y2_{i}"] = []
         self._envelope_source = ColumnDataSource(data=env_data)
 
         self._envelope_glyphs: list[Any] = []
-        for i in range(n_ch):
+        for i in range(self._max_glyphs):
             g = self._fig.varea(
                 x="x",
                 y1=f"y1_{i}",
@@ -436,12 +436,12 @@ class TraceViewer:
 
         # Line source: columns x, y_0, y_1, ...
         line_data: dict[str, list[Any]] = {"x": []}
-        for i in range(n_ch):
+        for i in range(self._max_glyphs):
             line_data[f"y_{i}"] = []
         self._line_source = ColumnDataSource(data=line_data)
 
         self._line_glyphs: list[Any] = []
-        for i in range(n_ch):
+        for i in range(self._max_glyphs):
             g = self._fig.line(
                 x="x",
                 y=f"y_{i}",
@@ -576,10 +576,11 @@ class TraceViewer:
 
                 # Apply pre-computed display data (single source assignment)
                 use_envelope = display["mode"] == "envelope"
+                n_ch = len(self.channels)
                 if self._last_was_raw is not (not use_envelope):
-                    for i in range(len(self.channels)):
-                        self._envelope_glyphs[i].visible = use_envelope
-                        self._line_glyphs[i].visible = not use_envelope
+                    for i in range(self._max_glyphs):
+                        self._envelope_glyphs[i].visible = use_envelope and i < n_ch
+                        self._line_glyphs[i].visible = (not use_envelope) and i < n_ch
 
                 if use_envelope:
                     self._envelope_source.data = display["data"]
@@ -634,10 +635,11 @@ class TraceViewer:
         self._last_x_end = x_end
 
         use_envelope = display["mode"] == "envelope"
+        n_ch = len(self.channels)
         if self._last_was_raw is not (not use_envelope):
-            for i in range(len(self.channels)):
-                self._envelope_glyphs[i].visible = use_envelope
-                self._line_glyphs[i].visible = not use_envelope
+            for i in range(self._max_glyphs):
+                self._envelope_glyphs[i].visible = use_envelope and i < n_ch
+                self._line_glyphs[i].visible = (not use_envelope) and i < n_ch
 
         if use_envelope:
             self._envelope_source.data = display["data"]
@@ -716,6 +718,24 @@ class TraceViewer:
 
         self._prefetch_futures.append(self._prefetch_executor.submit(_warm))
 
+    def _pad_source_data(self, data: dict[str, Any], mode: str) -> dict[str, Any]:
+        """Pad a source data dict with NaN columns for unused glyph slots.
+
+        NaN values are not rendered by Bokeh, so unused glyphs are
+        invisible even when visible=True.
+        """
+        n_ch = len(self.channels)
+        n_points = len(data["x"])
+        nans = np.full(n_points, np.nan)
+        if mode == "envelope":
+            for i in range(n_ch, self._max_glyphs):
+                data[f"y1_{i}"] = nans
+                data[f"y2_{i}"] = nans
+        else:
+            for i in range(n_ch, self._max_glyphs):
+                data[f"y_{i}"] = nans
+        return data
+
     def _prepare_display_data(self, result: WindowResult) -> dict[str, Any]:
         """Prepare downsampled display data dict on the fetch thread.
 
@@ -759,7 +779,7 @@ class TraceViewer:
         for i in range(len(self.channels)):
             new_data[f"y1_{i}"] = data[i, 0, :] + self._offsets[i]
             new_data[f"y2_{i}"] = data[i, 1, :] + self._offsets[i]
-        return {"mode": "envelope", "data": new_data}
+        return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope")}
 
     def _prepare_raw_display(self, result: WindowResult) -> dict[str, Any]:
         """Prepare raw display data, switching to envelope if too many points."""
@@ -776,7 +796,7 @@ class TraceViewer:
             new_data: dict[str, Any] = {"x": x}
             for i in range(len(self.channels)):
                 new_data[f"y_{i}"] = data[i, :] + self._offsets[i]
-            return {"mode": "line", "data": new_data}
+            return {"mode": "line", "data": self._pad_source_data(new_data, "line")}
 
         # Too many points — min/max bucket into envelope
         bucket_size = n_samples // self.width
@@ -795,7 +815,7 @@ class TraceViewer:
         for i in range(len(self.channels)):
             new_data[f"y1_{i}"] = mins[i, :] + self._offsets[i]
             new_data[f"y2_{i}"] = maxs[i, :] + self._offsets[i]
-        return {"mode": "envelope", "data": new_data}
+        return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope")}
 
     def _update_layout(self) -> None:
         """Recompute offsets and y-range after spacing/gain change."""
@@ -815,8 +835,8 @@ class TraceViewer:
     def set_channels(self, channels: list[int]) -> None:
         """Change which channels are displayed.
 
-        Rebuilds the Bokeh figure and swaps it into the Panel pane,
-        preserving the current time viewport.
+        Grows the glyph pool if needed, then updates visibility, y-axis
+        labels, and offsets on the existing figure.
 
         Parameters
         ----------
@@ -827,23 +847,57 @@ class TraceViewer:
         self._fetch_generation += 1
         self._pending_viewport = None
 
-        # Preserve current viewport
+        max_ch = min(len(channels), min(64, self.store.n_channels))
+        self.channels = list(channels[:max_ch])
+
+        # Grow glyph pool if needed
+        if max_ch > self._max_glyphs:
+            colors = _channel_colors(max_ch)
+            for i in range(self._max_glyphs, max_ch):
+                # Add envelope glyph
+                g = self._fig.varea(
+                    x="x",
+                    y1=f"y1_{i}",
+                    y2=f"y2_{i}",
+                    source=self._envelope_source,
+                    fill_alpha=0.7,
+                    color=colors[i],
+                )
+                g.visible = False
+                self._envelope_glyphs.append(g)
+                # Add line glyph
+                g = self._fig.line(
+                    x="x",
+                    y=f"y_{i}",
+                    source=self._line_source,
+                    line_width=0.5,
+                    color=colors[i],
+                )
+                g.visible = False
+                self._line_glyphs.append(g)
+            self._max_glyphs = max_ch
+        self._offsets = self._compute_channel_offsets()
+        self._last_was_raw = None  # force visibility reset on next render
+
+        # Update y-axis labels and range
+        n_ch = len(self.channels)
+        ch_ids = self.store.channel_ids
+        self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())  # type: ignore[assignment]
+        self._fig.yaxis.major_label_overrides = {  # type: ignore[attr-defined]
+            float(self._offsets[i]): (str(ch_ids[self.channels[i]]) if ch_ids is not None else str(self.channels[i]))
+            for i in range(n_ch)
+        }
+        self._fig.y_range.start = float(self._offsets[-1] - self.channel_spacing)  # type: ignore[union-attr]
+        self._fig.y_range.end = float(self._offsets[0] + self.channel_spacing)  # type: ignore[union-attr]
+
+        # Hide all glyphs, then let _update_data show the right ones
+        for i in range(self._max_glyphs):
+            self._envelope_glyphs[i].visible = False
+            self._line_glyphs[i].visible = False
+
+        # Re-render with current viewport
         x_start = float(self._fig.x_range.start)  # type: ignore[arg-type]
         x_end = float(self._fig.x_range.end)  # type: ignore[arg-type]
-
-        self.channels = list(channels)
-        self._offsets = self._compute_channel_offsets()
-        self._last_was_raw = None  # force visibility reset
-        self._build_figure()
-
-        # Restore viewport
-        self._fig.x_range.start = x_start  # type: ignore[assignment]
-        self._fig.x_range.end = x_end  # type: ignore[assignment]
-
-        # Swap figure into the Panel pane
-        self._fig_pane.object = self._fig
-
-        # Render with preserved viewport (blocking — need correct data before display)
         self._update_data(x_start, x_end)
 
     def set_gain(self, gain: float) -> None:
@@ -871,7 +925,7 @@ class TraceViewer:
         n_visible = pn.widgets.IntSlider(
             name="Visible channels",
             start=1,
-            end=min(128, self.store.n_channels),
+            end=min(64, self.store.n_channels),
             value=len(self.channels),
             step=1,
         )
@@ -958,9 +1012,7 @@ def _order_channels(
         # Sort by (y, x) position. Shallowest (largest y) first = top of display,
         # deepest (smallest y) last = bottom. x as tiebreaker for deterministic
         # ordering of channels at the same depth.
-        ch_with_pos = [
-            (ch, float(locations[ch, 1]), float(locations[ch, 0])) for ch in channels if ch < len(locations)
-        ]
+        ch_with_pos = [(ch, float(locations[ch, 1]), float(locations[ch, 0])) for ch in channels if ch < len(locations)]
         ch_with_pos.sort(key=lambda t: (-t[1], t[2]))  # descending y, ascending x
         return [ch for ch, _, _ in ch_with_pos]
 

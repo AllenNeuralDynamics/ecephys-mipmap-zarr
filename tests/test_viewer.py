@@ -37,8 +37,9 @@ class TestTraceViewerCreation:
         viewer = TraceViewer(store, n_channels=4)
         assert viewer._fig is not None
         assert len(viewer.channels) == 4
-        assert len(viewer._envelope_glyphs) == 4
-        assert len(viewer._line_glyphs) == 4
+        # Glyphs pre-allocated for max channels (8 in test store)
+        assert len(viewer._envelope_glyphs) == viewer._max_glyphs
+        assert len(viewer._line_glyphs) == viewer._max_glyphs
 
     def test_default_channels(self, tmp_path):
         store, _ = _make_store(tmp_path, n_channels=4)
@@ -49,7 +50,7 @@ class TestTraceViewerCreation:
         store, _ = _make_store(tmp_path, n_channels=8)
         viewer = TraceViewer(store, channels=[2, 5, 7])
         assert viewer.channels == [2, 5, 7]
-        assert len(viewer._envelope_glyphs) == 3
+        assert len(viewer._envelope_glyphs) == viewer._max_glyphs
 
     def test_auto_spacing(self, tmp_path):
         store, _ = _make_store(tmp_path)
