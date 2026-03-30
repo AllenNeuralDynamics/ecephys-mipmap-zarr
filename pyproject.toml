@@ -38,7 +38,23 @@ Changelog = "https://github.com/AllenNeuralDynamics/ecephys-mipmap-zarr/blob/mai
 
 [dependency-groups]
 types = ["mypy"]
-dev = [{ include-group = "types" }, "codespell", "pytest", "pytest-cov", "ruff", "interrogate", "pydantic-settings>=2.0", "rich", "panel>=1.0", "bokeh>=3.0", "param", "mtscomp", "s3fs", "wavpack-numcodecs"]
+dev = [
+    { include-group = "types" },
+    "codespell",
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "interrogate",
+    "pydantic-settings>=2.0",
+    "rich",
+    "panel>=1.0",
+    "bokeh>=3.0",
+    "param",
+    "mtscomp",
+    "s3fs",
+    "wavpack-numcodecs",
+    "matplotlib>=3.10.8",
+]
 jupyter = [{ include-group = "dev" }, "ipykernel", "pip"]
 
 [tool.hatch.build.targets.wheel]
