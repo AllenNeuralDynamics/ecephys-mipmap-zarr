@@ -28,7 +28,6 @@ from ecephys_mipmap_zarr._engine import (  # noqa: F401 — re-exported for back
     _build_finest_from_raw,
     _build_non_quantized,
     _cascade_minmax,
-    _clip_and_convert_to_int8,
     _compute_minmax_block,
     _convert_array_to_int8,
     _create_zarr_array,
@@ -657,7 +656,7 @@ def add_pyramid(
                     100 * pyr_outliers / pyr_total,
                 )
                 for s in strides:
-                    _clip_and_convert_to_int8(
+                    _convert_array_to_int8(
                         out_root,
                         minmax_path(s).lstrip("/"),
                         cfg.minmax_chunk,
@@ -665,6 +664,7 @@ def add_pyramid(
                         compressor,
                         entropy=pyr_entropy,
                         is_pyramid=True,
+                        clip=True,
                     )
             else:
                 _log.info(
