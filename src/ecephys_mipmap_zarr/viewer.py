@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 import panel as pn
-from bokeh.models import ColumnDataSource, FixedTicker, Range1d
+from bokeh.models import ColumnDataSource, FixedTicker, Label, Range1d
 from bokeh.plotting import figure as bokeh_figure
 
 from ecephys_mipmap_zarr.read import MipmapStore, WindowResult, open_mipmap
@@ -323,6 +323,7 @@ class TraceViewer:
         else:
             all_ch = list(channels)
         self._all_channels = _order_channels(all_ch, channel_order, store)
+        self._ch_to_all_idx = {ch: i for i, ch in enumerate(self._all_channels)}
         n_visible = min(n_channels, len(self._all_channels))
         self.channels = list(self._all_channels[:n_visible])
 
@@ -363,8 +364,9 @@ class TraceViewer:
         self._spike_data = spike_data
         self._build_figure()
         self._fig_pane = pn.pane.Bokeh(self._fig)
+        self._scale_bar_widget = self._build_scale_bar()
         self._controls = self._build_controls()
-        self._layout = pn.Row(self._fig_pane, self._controls)
+        self._layout = pn.Row(self._fig_pane, pn.Column(self._scale_bar_widget, self._controls))
 
         self._initial_render()
 
@@ -398,9 +400,62 @@ class TraceViewer:
         Looks up each visible channel's position in ``_all_offsets`` so
         that y-positions are consistent when panning through channels.
         """
-        ch_to_idx = {ch: i for i, ch in enumerate(self._all_channels)}
-        indices = [ch_to_idx[ch] for ch in self.channels if ch in ch_to_idx]
+        indices = [self._ch_to_all_idx[ch] for ch in self.channels if ch in self._ch_to_all_idx]
         return self._all_offsets[indices]
+
+    def _compute_scale_bar_value(self) -> float:
+        """Pick a nice round value for the scale bar."""
+        target = self.channel_spacing * 0.25 / max(self._gain, 0.01)
+        nice_values = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
+        return min(nice_values, key=lambda v: abs(v - target))
+
+    @staticmethod
+    def _format_scale_label(value: float, units: str) -> str:
+        """Format a scale bar label with appropriate unit prefix."""
+        if units.lower() in ("uv", "µv") and value >= 1000:
+            return f"{value / 1000:g} mV"
+        if value == int(value):
+            return f"{int(value)} {units}"
+        return f"{value:g} {units}"
+
+    def _build_scale_bar(self) -> pn.Column:
+        """Build a scale bar widget for the controls panel."""
+        bar_value = self._compute_scale_bar_value()
+        units = self.store._attrs.units
+        bar_height_px = 60  # fixed pixel height for the bar
+
+        scale_fig = bokeh_figure(
+            width=80, height=bar_height_px + 40,
+            x_range=Range1d(0, 1), y_range=Range1d(0, 1),
+            tools="", toolbar_location=None,
+            outline_line_color=None,
+        )
+        scale_fig.axis.visible = False
+        scale_fig.grid.visible = False
+
+        # Vertical bar centered horizontally
+        self._scale_bar_source = ColumnDataSource(
+            data={"x0": [0.3], "y0": [0.1], "x1": [0.3], "y1": [0.9]}
+        )
+        scale_fig.segment(
+            x0="x0", y0="y0", x1="x1", y1="y1",
+            source=self._scale_bar_source,
+            line_width=3, line_color="black",
+        )
+        self._scale_bar_label = Label(
+            x=0.4, y=0.35,
+            text=self._format_scale_label(bar_value, units),
+            text_font_size="11px",
+        )
+        scale_fig.add_layout(self._scale_bar_label)
+        self._scale_bar_fig = scale_fig
+        return pn.Column(pn.pane.Bokeh(scale_fig), width=100)
+
+    def _update_scale_bar(self) -> None:
+        """Update the scale bar label when gain changes."""
+        bar_value = self._compute_scale_bar_value()
+        units = self.store._attrs.units
+        self._scale_bar_label.text = self._format_scale_label(bar_value, units)
 
     def _build_figure(self) -> None:
         """Create the Bokeh figure with glyphs and sources."""
@@ -435,7 +490,6 @@ class TraceViewer:
 
         # Glyphs allocated on demand — start with initial channel count
         self._max_glyphs = len(self.channels)
-        colors = _channel_colors(self._max_glyphs)
 
         # Envelope source: columns x, y1_0, y2_0, y1_1, y2_1, ...
         env_data: dict[str, list[Any]] = {"x": []}
@@ -452,7 +506,7 @@ class TraceViewer:
                 y2=f"y2_{i}",
                 source=self._envelope_source,
                 fill_alpha=0.7,
-                color=colors[i],
+                color="black",
             )
             g.visible = False
             self._envelope_glyphs.append(g)
@@ -470,7 +524,7 @@ class TraceViewer:
                 y=f"y_{i}",
                 source=self._line_source,
                 line_width=0.5,
-                color=colors[i],
+                color="black",
             )
             g.visible = False
             self._line_glyphs.append(g)
@@ -563,7 +617,6 @@ class TraceViewer:
 
                 # Grow glyph pool if needed
                 if n_ch > self._max_glyphs:
-                    colors = _channel_colors(n_ch)
                     for i in range(self._max_glyphs, n_ch):
                         g = self._fig.varea(
                             x="x",
@@ -571,7 +624,7 @@ class TraceViewer:
                             y2=f"y2_{i}",
                             source=self._envelope_source,
                             fill_alpha=0.7,
-                            color=colors[i],
+                            color="black",
                         )
                         g.visible = False
                         self._envelope_glyphs.append(g)
@@ -580,7 +633,7 @@ class TraceViewer:
                             y=f"y_{i}",
                             source=self._line_source,
                             line_width=0.5,
-                            color=colors[i],
+                            color="black",
                         )
                         g.visible = False
                         self._line_glyphs.append(g)
@@ -690,13 +743,13 @@ class TraceViewer:
                 self._last_x_start = x_start
                 self._last_x_end = x_end
 
-                # Apply pre-computed display data (single source assignment)
+                # Apply pre-computed display data (colors are slot-based, never change)
                 use_envelope = display["mode"] == "envelope"
-                n_ch = len(self.channels)
+                n_fetched = len(channels)
                 if self._last_was_raw is not (not use_envelope):
                     for i in range(self._max_glyphs):
-                        self._envelope_glyphs[i].visible = use_envelope and i < n_ch
-                        self._line_glyphs[i].visible = (not use_envelope) and i < n_ch
+                        self._envelope_glyphs[i].visible = use_envelope and i < n_fetched
+                        self._line_glyphs[i].visible = (not use_envelope) and i < n_fetched
 
                 if use_envelope:
                     self._envelope_source.data = display["data"]
@@ -744,16 +797,17 @@ class TraceViewer:
         if t0 >= t1:
             return
 
-        result = self.store.get_window(t0, t1, channels=self.channels, num_points=self.width)
+        channels = list(self.channels)
+        result = self.store.get_window(t0, t1, channels=channels, num_points=self.width)
         display = self._prepare_display_data(
-            result, channels=list(self.channels), offsets=self._offsets.copy(), gain=self._gain
+            result, channels=channels, offsets=self._offsets.copy(), gain=self._gain
         )
 
         self._last_x_start = x_start
         self._last_x_end = x_end
 
         use_envelope = display["mode"] == "envelope"
-        n_ch = len(self.channels)
+        n_ch = len(channels)
         if self._last_was_raw is not (not use_envelope):
             for i in range(self._max_glyphs):
                 self._envelope_glyphs[i].visible = use_envelope and i < n_ch
@@ -775,6 +829,9 @@ class TraceViewer:
                 raw_result=result if result.is_raw else None,
                 fs=self.store.sampling_frequency,
             )
+
+        # Update scale bar position
+        self._update_scale_bar()
 
         # Prefetch adjacent shard for remote stores
         if self._prefetch_executor is not None:
@@ -986,28 +1043,25 @@ class TraceViewer:
         max_ch = min(len(channels), min(64, self.store.n_channels))
         self.channels = list(channels[:max_ch])
 
-        # Grow glyph pool if needed
+        # Grow glyph pool if needed (colors set by _update_glyph_colors below)
         if max_ch > self._max_glyphs:
-            colors = _channel_colors(max_ch)
             for i in range(self._max_glyphs, max_ch):
-                # Add envelope glyph
                 g = self._fig.varea(
                     x="x",
                     y1=f"y1_{i}",
                     y2=f"y2_{i}",
                     source=self._envelope_source,
                     fill_alpha=0.7,
-                    color=colors[i],
+                    color="black",
                 )
                 g.visible = False
                 self._envelope_glyphs.append(g)
-                # Add line glyph
                 g = self._fig.line(
                     x="x",
                     y=f"y_{i}",
                     source=self._line_source,
                     line_width=0.5,
-                    color=colors[i],
+                    color="black",
                 )
                 g.visible = False
                 self._line_glyphs.append(g)
@@ -1029,7 +1083,7 @@ class TraceViewer:
         self._fig.y_range.start = float(self._offsets[-1] - self.channel_spacing)  # type: ignore[union-attr]
         self._fig.y_range.end = float(self._offsets[0] + self.channel_spacing)  # type: ignore[union-attr]
 
-        # Hide all glyphs, then let _update_data show the right ones
+        # Hide all glyphs — colors are updated in _apply atomically with data
         for i in range(self._max_glyphs):
             self._envelope_glyphs[i].visible = False
             self._line_glyphs[i].visible = False
@@ -1159,11 +1213,6 @@ def _order_channels(
     raise ValueError(msg)
 
 
-def _channel_colors(n: int) -> list[str]:
-    """Generate a list of N channel colors from Bokeh's Category10 palette."""
-    from bokeh.palettes import Category10_10
-
-    return [Category10_10[i % len(Category10_10)] for i in range(n)]
 
 
 def view(
