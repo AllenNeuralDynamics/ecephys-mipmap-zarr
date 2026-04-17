@@ -195,8 +195,7 @@ class BuildSettings:
                 int(self.duration_seconds * sampling_frequency) if self.duration_seconds is not None else None
             )
             source = SIRecordingSource(rec, start_sample=start_sample, n_samples=capped_n_samples)
-            built_source_metadata = build_source_metadata(rec, self.raw_path_override)
-            assert built_source_metadata is not None
+            built_source_metadata = build_source_metadata(rec)
             if start_sample > 0:
                 t0: float = built_source_metadata.get("t_start") or 0.0
                 built_source_metadata["t_start"] = t0 + start_sample / sampling_frequency

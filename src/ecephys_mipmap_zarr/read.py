@@ -314,9 +314,10 @@ class MipmapStore:
             msg = f"num_points must be positive, got {num_points}"
             raise ValueError(msg)
 
-        # Clamp sample range
-        t0 = max(0, t0)
-        t1 = min(t1, self._attrs.n_samples)
+        # Clamp sample range and coerce to int (callers sometimes pass
+        # numpy scalars or floats, which zarr's slice indexer rejects).
+        t0 = max(0, int(t0))
+        t1 = min(int(t1), int(self._attrs.n_samples))
         if t0 >= t1:
             msg = f"Empty window after clamping: t0={t0}, t1={t1}"
             raise ValueError(msg)

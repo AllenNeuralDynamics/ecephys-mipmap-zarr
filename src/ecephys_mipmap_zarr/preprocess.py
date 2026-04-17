@@ -33,11 +33,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from ecephys_mipmap_zarr._store import (
-    _extract_source_metadata,
-    _extract_t_start,
-    _open_store,
-)
 
 if TYPE_CHECKING:
     from spikeinterface.core.baserecording import BaseRecording
@@ -112,62 +107,43 @@ def load_preprocessed_recording(
     return rec
 
 
-def build_source_metadata(
-    rec: BaseRecording,
-    raw_path: str,
-    *,
-    raw_storage_options: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def build_source_metadata(rec: BaseRecording) -> dict[str, Any]:
     """Build the ``source_metadata`` dict for ``build_mipmap``.
 
-    Combines per-channel properties from *rec* (already sliced to the
-    preprocessed channel set) with probe/annotation metadata read
-    from the raw zarr.
+    Pulls per-channel properties (``channel_ids``, ``location``,
+    ``gain_to_uV``, ``offset_to_uV``), ``t_start`` (from the per-sample
+    time vector), and probe/annotation info directly from *rec*.  This
+    avoids opening the raw v2 wavpack zarr ourselves — SI already
+    loaded and decoded everything.
 
     Parameters
     ----------
     rec : BaseRecording
         Output of :func:`load_preprocessed_recording`.
-    raw_path : str
-        Path or URI to the raw zarr (for probe info, annotations,
-        ``t_start``, and to look up raw-channel indices).
-    raw_storage_options : dict or None, optional
-        fsspec storage options for *raw_path*.
 
     Returns
     -------
     dict
         Schema compatible with ``build_mipmap(source_metadata=...)``.
     """
-    si_channel_ids = np.asarray(rec.channel_ids)
+    metadata: dict[str, Any] = {"channel_ids": np.asarray(rec.channel_ids)}
 
-    src = _open_store(raw_path, mode="r")
-    raw_channel_ids = np.asarray(src["channel_ids"][:])
+    for prop in ("location", "gain_to_uV", "offset_to_uV"):
+        values = rec.get_property(prop)
+        if values is not None:
+            metadata[prop] = np.asarray(values)
 
-    # Map preprocessed channels → indices in the raw zarr
-    raw_idx = np.array([int(np.where(raw_channel_ids == cid)[0][0]) for cid in si_channel_ids])
+    if rec.has_time_vector(segment_index=0):
+        metadata["t_start"] = float(rec.get_times(segment_index=0)[0])
 
-    metadata: dict[str, Any] = {"channel_ids": si_channel_ids}
+    # Split annotations into probe (probes_info) + everything else
+    annotations = dict(getattr(rec, "_annotations", {}))
+    probes_info = annotations.pop("probes_info", None)
+    if probes_info is not None:
+        metadata["probe"] = {"probes": probes_info}
+    if annotations:
+        metadata["annotations"] = annotations
 
-    source_meta = _extract_source_metadata(src)
-    if source_meta is not None:
-        metadata.update(source_meta)  # probe, annotations
-
-    t_start = _extract_t_start(src)
-    if t_start is not None:
-        metadata["t_start"] = t_start
-
-    try:
-        props = src["properties"]
-        if "location" in list(props):
-            metadata["location"] = np.asarray(props["location"][:])[raw_idx]
-        if "gain_to_uV" in list(props) and "offset_to_uV" in list(props):
-            metadata["gain_to_uV"] = np.asarray(props["gain_to_uV"][:])[raw_idx]
-            metadata["offset_to_uV"] = np.asarray(props["offset_to_uV"][:])[raw_idx]
-    except (KeyError, AttributeError):
-        pass
-
-    del raw_storage_options  # currently unused; reserved for future fsspec plumbing
     return metadata
 
 
@@ -250,21 +226,49 @@ def _read_analyzer_recording_dict(
 ) -> dict[str, Any]:
     """Extract the recording provenance dict from a SortingAnalyzer zarr.
 
-    Uses SI's ``super_zarr_open`` so the analyzer zarr itself (which may
-    still be in zarr v2 layout) is read correctly.
+    The analyzer is a zarr v2 store and its ``recording`` array has
+    object dtype (``|O``) with a ``json2`` codec.  Zarr 3.x can't open
+    object arrays, so we bypass zarr entirely and decode the single
+    chunk manually via ``fsspec`` + ``numcodecs``.
     """
-    try:
-        from spikeinterface.core.zarrextractors import super_zarr_open
-    except ImportError as e:
-        msg = "spikeinterface is required for analyzer-based builds: pip install ecephys-mipmap-zarr[si]"
-        raise ImportError(msg) from e
+    import json
 
-    root = super_zarr_open(analyzer_path, mode="r", storage_options=storage_options or {})
-    rec_field = root.get("recording")
-    if rec_field is None:
-        msg = f"No recording dict found in analyzer: {analyzer_path}"
+    import fsspec
+    import numcodecs
+
+    path = analyzer_path.rstrip("/")
+    opener_kwargs: dict[str, Any] = {}
+    if "://" in path:
+        opener_kwargs.update(storage_options or {})
+    zarray_path = f"{path}/recording/.zarray"
+    chunk_path = f"{path}/recording/0"
+
+    with fsspec.open(zarray_path, mode="rb", **opener_kwargs) as f:
+        zarray = json.loads(f.read())
+    if zarray.get("dtype") != "|O":
+        msg = f"unexpected dtype for recording array: {zarray.get('dtype')!r}"
         raise ValueError(msg)
-    result: dict[str, Any] = rec_field[0]
+
+    # Codec pipeline: compressor decompresses bytes → filters decode them
+    # back to Python objects (the json2 filter returns an ndarray of dicts).
+    compressor = numcodecs.get_codec(zarray["compressor"])
+    filters = [numcodecs.get_codec(f) for f in (zarray.get("filters") or [])]
+
+    with fsspec.open(chunk_path, mode="rb", **opener_kwargs) as f:
+        raw_bytes = f.read()
+
+    data: Any = compressor.decode(raw_bytes)
+    for filt in reversed(filters):
+        data = filt.decode(data)
+
+    arr = np.asarray(data).reshape(-1)
+    if arr.size == 0:
+        msg = f"recording array is empty: {analyzer_path}"
+        raise ValueError(msg)
+    result: dict[str, Any] = arr[0]
+    if not isinstance(result, dict):
+        msg = f"decoded recording entry is not a dict: type={type(result).__name__}"
+        raise ValueError(msg)
     return result
 
 
