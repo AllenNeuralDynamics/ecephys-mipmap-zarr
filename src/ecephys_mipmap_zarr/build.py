@@ -95,6 +95,7 @@ def build_mipmap(
     quantization: QuantizationConfig = DEFAULT_QUANTIZATION_CONFIG,
     metadata_from: str | Path | None = None,
     source_metadata: dict[str, Any] | None = None,
+    t_start_offset: float = 0.0,
     progress: ProgressCallback | None = None,
 ) -> None:
     """Build a complete mipmap Zarr store from an array-like source.
@@ -136,6 +137,14 @@ def build_mipmap(
         is derived from a processing chain whose channel set no longer
         matches the underlying zarr (e.g. after bad-channel removal).
         Mutually exclusive with *metadata_from*.
+    t_start_offset : float, optional
+        Seconds added to the derived ``t_start`` before it's written
+        to root attrs.  Intended for windowed builds (e.g. when the
+        caller is only mipmapping seconds 60-120 of a longer
+        recording): the mipmap's absolute time axis should start at
+        ``raw_t_start + t_start_offset``.  When no ``t_start`` is
+        derived and *t_start_offset* > 0, the offset alone is written
+        as ``t_start``.  Default 0.0.
 
     Raises
     ------
@@ -384,6 +393,9 @@ def build_mipmap(
         t_start = source_metadata.get("t_start")
         passthrough = {k: source_metadata[k] for k in ("probe", "annotations") if k in source_metadata}
         attrs_source_metadata = passthrough if passthrough else None
+
+    if t_start_offset:
+        t_start = (t_start or 0.0) + float(t_start_offset)
 
     # Set root attributes
     attrs = MipmapAttrs(

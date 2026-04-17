@@ -62,6 +62,102 @@ def _is_zarr_store(path: str) -> bool:
     return p.suffix == ".zarr" or (p / "zarr.json").exists()
 
 
+def _resolve_window(
+    start_seconds: float,
+    duration_seconds: float | None,
+    sampling_frequency: float,
+    full_samples: int,
+) -> tuple[int, int | None]:
+    """Translate --start-seconds / --duration-seconds into sample indices.
+
+    Returns ``(start_sample, n_samples)`` where *n_samples* is ``None``
+    when the user didn't specify a duration (meaning "to the end").
+    """
+    start_sample = max(0, int(start_seconds * sampling_frequency))
+    if start_sample >= full_samples:
+        msg = (
+            f"--start-seconds {start_seconds:.3f} (sample {start_sample:,}) "
+            f"is past the end of the recording ({full_samples:,} samples)"
+        )
+        raise ValueError(msg)
+    if duration_seconds is None:
+        return start_sample, None
+    n_samples = int(duration_seconds * sampling_frequency)
+    n_samples = min(n_samples, full_samples - start_sample)
+    return start_sample, n_samples
+
+
+def _maybe_window_source(
+    source: Any,
+    start_seconds: float,
+    duration_seconds: float | None,
+    sampling_frequency: float,
+    full_samples: int,
+) -> tuple[Any, int]:
+    """Wrap *source* in :class:`_WindowedSource` if a time window is requested.
+
+    Returns ``(windowed_source, n_samples)``.  When no window is given
+    (offset zero and duration unset), *source* is returned unchanged
+    with ``n_samples = full_samples``.
+    """
+    start_sample, capped = _resolve_window(start_seconds, duration_seconds, sampling_frequency, full_samples)
+    if start_sample == 0 and capped is None:
+        return source, full_samples
+    end_sample = full_samples if capped is None else start_sample + capped
+    return _WindowedSource(source, start_sample, end_sample), end_sample - start_sample
+
+
+class _WindowedSource:
+    """Array-like wrapper restricting a (T, C) source to a sample range.
+
+    Implements the same ``shape`` / ``dtype`` / 2D slice interface the
+    build engine uses (see ``_engine._write_raw_and_compute_finest``).
+    Access is lazy — the underlying source is indexed on each read
+    with ``start`` added to the time-axis slice — so this works with
+    zarr arrays, numpy memmaps, and mtscomp readers alike without
+    pulling the whole window into memory up front.
+    """
+
+    def __init__(self, source: Any, start_sample: int, end_sample: int) -> None:
+        full_n, n_channels = source.shape
+        if start_sample < 0 or start_sample >= full_n:
+            msg = f"start_sample={start_sample} out of range [0, {full_n})"
+            raise ValueError(msg)
+        if end_sample < start_sample or end_sample > full_n:
+            msg = f"end_sample={end_sample} out of range [{start_sample}, {full_n}]"
+            raise ValueError(msg)
+        self._source = source
+        self._start = int(start_sample)
+        self._n_samples = int(end_sample - start_sample)
+        self._n_channels = int(n_channels)
+        self._dtype = np.dtype(source.dtype)
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """``(n_samples, n_channels)`` of the restricted window."""
+        return (self._n_samples, self._n_channels)
+
+    @property
+    def dtype(self) -> np.dtype[Any]:
+        """Underlying source dtype."""
+        return self._dtype
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        """Support ``src[t0:t1, :]`` — indices are window-relative."""
+        if isinstance(key, tuple) and len(key) == 2:
+            t_key, ch_key = key
+            if isinstance(t_key, slice):
+                start = (t_key.start or 0) + self._start
+                stop = (t_key.stop if t_key.stop is not None else self._n_samples) + self._start
+                return np.asarray(self._source[start:stop, ch_key])
+        if isinstance(key, slice):
+            start = (key.start or 0) + self._start
+            stop = (key.stop if key.stop is not None else self._n_samples) + self._start
+            return np.asarray(self._source[start:stop])
+        msg = f"_WindowedSource only supports 1D/2D slicing, got {type(key).__name__}"
+        raise TypeError(msg)
+
+
 def _open_cbin(path: str, sampling_frequency: float | None) -> tuple[Any, str, float]:
     """Open a .cbin file via mtscomp and read params.py if available.
 
@@ -127,9 +223,9 @@ class BuildSettings:
     keep_bad_channels: bool = False
     """When --from-analyzer: peel off the outer ChannelSlice wrapper to keep dead+noise channels."""
     start_seconds: float = 0.0
-    """When --from-analyzer: offset into the recording at which to start the mipmap (seconds)."""
+    """Offset into the source recording at which to start the mipmap, in seconds."""
     duration_seconds: float | None = None
-    """When --from-analyzer: length of the window to include (seconds); default = rest of recording."""
+    """Length of the source window to include, in seconds; default = rest of recording."""
     sampling_frequency: float | None = None
     """Sampling rate in Hz (auto-detected for .cbin)."""
     units: str = "uV"
@@ -190,15 +286,11 @@ class BuildSettings:
             )
             sampling_frequency = float(rec.get_sampling_frequency())
             full_samples = int(rec.get_num_samples())
-            start_sample = int(self.start_seconds * sampling_frequency)
-            capped_n_samples: int | None = (
-                int(self.duration_seconds * sampling_frequency) if self.duration_seconds is not None else None
+            start_sample, capped_n_samples = _resolve_window(
+                self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
             )
             source = SIRecordingSource(rec, start_sample=start_sample, n_samples=capped_n_samples)
             built_source_metadata = build_source_metadata(rec)
-            if start_sample > 0:
-                t0: float = built_source_metadata.get("t_start") or 0.0
-                built_source_metadata["t_start"] = t0 + start_sample / sampling_frequency
             dtype = str(rec.get_dtype())
             n_samples, n_channels = source.shape
             clip_note = (
@@ -222,16 +314,22 @@ class BuildSettings:
             raw_array = root[self.raw_path]
             source = raw_array
             dtype = str(raw_array.dtype)  # type: ignore[union-attr]
-            n_samples, n_channels = raw_array.shape  # type: ignore[union-attr]
+            full_samples, n_channels = raw_array.shape  # type: ignore[union-attr]
             sampling_frequency = self.sampling_frequency
-            console.print(f"  shape: ({n_samples}, {n_channels}), dtype: {dtype}")
+            console.print(f"  shape: ({full_samples}, {n_channels}), dtype: {dtype}")
+            source, n_samples = _maybe_window_source(
+                source, self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
+            )
 
         elif input_path.suffix == ".cbin":
             source, dtype, sampling_frequency = _open_cbin(self.input, self.sampling_frequency)
-            n_samples, n_channels = source.shape
+            full_samples, n_channels = source.shape
             console.print(
-                f"Reading cbin: {self.input} ({n_samples:,} samples, {n_channels} channels, "
+                f"Reading cbin: {self.input} ({full_samples:,} samples, {n_channels} channels, "
                 f"{dtype}, {sampling_frequency:.0f} Hz)"
+            )
+            source, n_samples = _maybe_window_source(
+                source, self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
             )
 
         else:
@@ -243,10 +341,19 @@ class BuildSettings:
                 raise SystemExit(1)
             dtype = self.dtype
             sampling_frequency = self.sampling_frequency
-            n_samples = self.n_samples
+            full_samples = self.n_samples
             n_channels = self.n_channels
-            console.print(f"Reading binary: {self.input} ({n_samples:,} samples, {n_channels} channels, {dtype})")
-            source = np.memmap(self.input, dtype=dtype, mode="r", shape=(n_samples, n_channels))
+            console.print(f"Reading binary: {self.input} ({full_samples:,} samples, {n_channels} channels, {dtype})")
+            source = np.memmap(self.input, dtype=dtype, mode="r", shape=(full_samples, n_channels))
+            source, n_samples = _maybe_window_source(
+                source, self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
+            )
+
+        if n_samples < full_samples:
+            console.print(
+                f"  windowed: {n_samples:,} samples (offset {self.start_seconds:.3f}s, "
+                f"duration {n_samples / sampling_frequency:.3f}s)"
+            )
 
         console.print(f"Building mipmap → {self.output}")
         build_config = BuildConfig(
@@ -272,6 +379,7 @@ class BuildSettings:
                 quantization=quant_config,
                 metadata_from=None if built_source_metadata is not None else self.metadata_from,
                 source_metadata=built_source_metadata,
+                t_start_offset=float(self.start_seconds),
                 progress=progress_fn,
             )
         console.print("[green]Done.[/green]")

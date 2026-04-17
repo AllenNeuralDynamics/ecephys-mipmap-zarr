@@ -98,6 +98,17 @@ In `_read_raw` and `_read_minmax`:
 - If `RawQuantization` present: dequantize to float32 µV (already implemented)
 - If only `lsb_shift` present (no gain/offset): `data.astype(int16) << lsb_shift` to reconstruct ADC values
 
+### Viewer optimization for LSB-shift stores
+
+For integer-like stores that use uniform array-level `lsb_shift`, the viewer should fetch stored data with `dequantize=False` and keep the compact dtype as long as possible.
+
+- [ ] Add an LSB-shift-specific viewer path that requests stored raw/minmax data instead of reconstructed ADC values
+- [ ] Normalize pyramid amplitudes to the raw viewer scale after fetch so raw/envelope mode switches keep a consistent visual height
+- [ ] Keep channel-spacing estimation on the reduced-range data for uniform-shift stores
+- [ ] Drive gain, y-scaling, and scale-bar labels from the known shift metadata instead of reconstructing the full time series
+- [ ] Do not apply this optimization to per-channel quantized float stores (`RawQuantization` / `LevelQuantization`)
+- [ ] Benchmark whether the reduced `int8` payload materially improves viewer fetch/downsampling performance
+
 ### Auto-detection of optimal shift
 
 The optimal shift depends on the device's noise floor, which varies by probe type and isn't always known in advance. Auto-compute from the data:
@@ -295,6 +306,18 @@ Implemented: `ProgressCallback` type alias, `_progress_bar()` context manager wi
 
 Implemented: `main()` wraps `tyro.cli(...)` in try/except with `console.print_exception()` and `SystemExit(1)`.
 
+## Windowed `add-pyramid`
+
+`build --start-seconds / --duration-seconds` bundles the windowed raw into `/raw`, so the mipmap is self-consistent.  `add-pyramid` builds pyramid-only stores that reference an external raw zarr via the `raw_source` attr, so the same flags would leave a mismatch between the windowed pyramid and the full-length external `/raw`.
+
+### Implementation sketch
+
+- Add `raw_sample_offset: int = 0` to `MipmapAttrs`.
+- Thread it through the reader: `MipmapStore._read_raw` / `_find_raw_array` add the offset to the time-axis slice when indexing the external array.
+- Scale `t_start` by `raw_sample_offset / fs`, same as `build`.
+- `add-pyramid` CLI grows `--start-seconds`/`--duration-seconds`; wraps the external raw in `_WindowedSource` for pyramid computation, stores `raw_sample_offset` + windowed `n_samples` on the output store.
+- Tests: readback from a windowed pyramid-only store returns the correct slice of the external raw.
+
 ## Overview minimap
 
 A small Bokeh figure above the main viewer showing the full recording duration with a highlighted rectangle for the current viewport. Bokeh's `RangeTool` links the minimap selection to the main figure's x_range.
@@ -322,6 +345,52 @@ Implemented: after rendering, detect pan direction and submit minimal background
 ## ~~Non-blocking viewer data fetches~~ DONE
 
 Implemented: viewport changes submit data fetches to background thread. Render scheduled back on Bokeh event loop via `add_next_tick_callback`. Generation counter discards stale fetches. Initial render stays synchronous.
+
+## `--remote` flag for viewer (cloud workstations)
+
+The viewer's `pn.serve(show=True)` is fine locally but breaks under reverse proxies used by cloud IDEs (Code Ocean / JupyterHub / etc.):
+
+1. `show=True` tries to open a browser against `http://localhost:<port>` — meaningless from the user's laptop through the proxy.
+2. Bokeh rejects websocket upgrades whose `Origin` header isn't in `allow_websocket_origin` — so even if the user opens the proxied URL manually, the websocket handshake 403s.
+3. JupyterHub's `jupyter-server-proxy` mounts apps under a path prefix (e.g. `/proxy/5006/`). Panel/Bokeh need to be told their external root so generated asset / WS URLs are correct.
+
+Add a `--remote` flag (or `ViewSettings.remote: bool`) to the `view` subcommand that switches `pn.serve` into a proxy-friendly configuration:
+
+```python
+pn.serve(
+    viewer.panel(),
+    address="0.0.0.0",
+    port=port,                       # optional --port
+    show=False,                      # proxy handles tab opening
+    allow_websocket_origin=origins,  # "*" by default when --remote
+    prefix=prefix,                   # optional --url-prefix for jupyter-server-proxy
+    websocket_origin=ws_origin,      # optional explicit value if wildcard is rejected
+)
+```
+
+### Deployment targets
+
+- **Code Ocean code-server workstation**: detects the bound port, sets `$BROWSER` to a proxy wrapper, auto-opens a new tab. Only needs `address="0.0.0.0"` + `allow_websocket_origin="*"`; prefix not required.
+- **JupyterLab / JupyterHub via `jupyter-server-proxy`**: user opens `https://<hub>/user/<name>/proxy/<port>/`. Needs `prefix="/user/<name>/proxy/<port>"` so `BokehDoc`'s autoload.js / WS URLs resolve correctly. Can often be derived from `JUPYTERHUB_SERVICE_PREFIX` + port.
+- **Plain SSH / kubectl port-forward**: no proxy — `--remote` + manual tunnel is fine.
+
+### CLI shape
+
+```bash
+ecephys-mipmap view <store> --remote                 # wildcard origin, any port
+ecephys-mipmap view <store> --remote --port 5006     # fixed port
+ecephys-mipmap view <store> --remote --url-prefix /proxy/5006   # jupyter-server-proxy
+ecephys-mipmap view <store> --remote --allow-origin foo.bar.com # tighten origin
+```
+
+### Implementation tasks
+
+- [ ] Add `remote: bool = False`, `port: int | None = None`, `url_prefix: str | None = None`, `allow_origin: list[str] | None = None` to `ViewSettings`
+- [ ] In `TraceViewer.show()`, accept an optional `remote_config` (dataclass wrapping the above) and fan those out to `pn.serve()` kwargs
+- [ ] When `remote=True` and `allow_origin` is None, default `allow_websocket_origin="*"` and log that so users see they're wide open
+- [ ] Auto-populate `url_prefix` from `JUPYTERHUB_SERVICE_PREFIX` when that env is set and `--url-prefix` not provided
+- [ ] Print the bound URL (with prefix) to stdout after `pn.serve` comes up, so users on plain terminals have something to click / tunnel
+- [ ] README: short "Running in a cloud IDE" section with Code Ocean and JupyterHub recipes
 
 ## 2D channel+time panning
 
