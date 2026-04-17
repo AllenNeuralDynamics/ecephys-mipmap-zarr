@@ -838,10 +838,11 @@ def _build_non_quantized(
     progress: ProgressCallback | None,
     clip_outliers: bool = True,
     prefetch_chunks: int = 0,
-) -> int:
+) -> tuple[int, int]:
     """Build raw + pyramid arrays with optional LSB shift.
 
-    Returns the resolved raw shift value (0 if no shift).
+    Returns ``(raw_shift, pyr_shift)`` — the resolved shift values
+    (0 if no shift).
     """
     raw_shift = _resolve_lsb_shift(lsb_shift_raw, source, n_samples, noise_floor)
     pyr_shift = _resolve_lsb_shift(
@@ -999,4 +1000,4 @@ def _build_non_quantized(
                     100 * result.pyr_outliers / max(result.pyr_total, 1),
                 )
 
-    return raw_shift
+    return raw_shift, pyr_shift

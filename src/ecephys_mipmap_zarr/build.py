@@ -38,6 +38,7 @@ from ecephys_mipmap_zarr._engine import (  # noqa: F401 — re-exported for back
     _write_raw_and_compute_finest,
 )
 from ecephys_mipmap_zarr._store import (
+    _apply_adc_pyramid_quantization,
     _apply_adc_quantization,
     _copy_source_arrays,
     _extract_source_metadata,
@@ -174,6 +175,7 @@ def build_mipmap(
     do_quantize_pyramids = quantize_pyramids if quantize_pyramids is not None else quantize
 
     raw_shift = 0  # set in non-quantized path; stays 0 for quantized path
+    pyr_shift = 0
 
     if do_quantize_raw or do_quantize_pyramids:
         # --- Quantized path ---
@@ -323,7 +325,7 @@ def build_mipmap(
             )
     else:
         # --- Non-quantized path with optional LSB shift ---
-        raw_shift = _build_non_quantized(
+        raw_shift, pyr_shift = _build_non_quantized(
             source=source,
             root=root,
             strides=strides,
@@ -352,9 +354,10 @@ def build_mipmap(
         t_start = _extract_t_start(meta_root)
         _copy_source_arrays(meta_root, root)
 
-        # Store ADC gain/offset as RawQuantization if available
-        # When LSB shift is active, combine shift into gain scale
+        # Store ADC gain/offset as quantization metadata if available.
+        # When LSB shift is active, combine shift into gain scale.
         _apply_adc_quantization(meta_root, root, lsb_shift=raw_shift)
+        _apply_adc_pyramid_quantization(meta_root, root, strides=strides, lsb_shift=pyr_shift)
 
     # Set root attributes
     attrs = MipmapAttrs(

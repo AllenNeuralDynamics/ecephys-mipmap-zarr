@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import zarr
 
-from ecephys_mipmap_zarr.metadata import RawQuantization
+from ecephys_mipmap_zarr.metadata import LevelQuantization, RawQuantization
 
 __all__: list[str] = []  # private module
 
@@ -293,3 +293,58 @@ def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group, lsb_shift: int = 0
         existing["quantization"] = rq.to_dict()
         raw_array.attrs.clear()
         raw_array.attrs.update(existing)
+
+
+def _apply_adc_pyramid_quantization(
+    src: zarr.Group,
+    dst: zarr.Group,
+    strides: list[int],
+    lsb_shift: int = 0,
+) -> None:
+    """Store ADC gain/offset as LevelQuantization on pyramid arrays.
+
+    Analogous to :func:`_apply_adc_quantization` but for pyramid
+    ``/minmax/sN`` arrays.  Uses :class:`LevelQuantization` with
+    identical min/max offsets (ADC offset is the same for both axes).
+
+    Parameters
+    ----------
+    src : zarr.Group
+        Source SI zarr store with ``properties/gain_to_uV``.
+    dst : zarr.Group
+        Destination mipmap store with ``/minmax/sN`` arrays.
+    strides : list[int]
+        Pyramid strides (e.g. ``[32, 256, 2048, ...]``).
+    lsb_shift : int, optional
+        LSB shift applied to pyramid data, by default 0.
+    """
+    try:
+        props = src["properties"]
+        gain = np.asarray(props["gain_to_uV"][:])  # type: ignore[index]
+        offset = np.asarray(props["offset_to_uV"][:])  # type: ignore[index]
+    except (KeyError, AttributeError):
+        return
+
+    effective_gain = gain * (1 << lsb_shift) if lsb_shift > 0 else gain
+
+    for stride in strides:
+        path = f"minmax/s{stride}"
+        try:
+            mm_array: zarr.Array = dst[path]  # type: ignore[assignment]
+        except KeyError:
+            continue
+
+        lq = LevelQuantization(
+            min_offset=offset.tolist(),
+            max_offset=offset.tolist(),
+            scale=effective_gain.tolist(),
+            source_dtype="float32",
+            quantized_dtype=str(mm_array.dtype),
+        )
+
+        existing = dict(mm_array.attrs)
+        existing.pop("lsb_shift", None)
+        existing.pop("original_dtype", None)
+        existing["quantization"] = lq.to_dict()
+        mm_array.attrs.clear()
+        mm_array.attrs.update(existing)
