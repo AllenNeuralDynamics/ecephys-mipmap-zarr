@@ -45,6 +45,7 @@ from ecephys_mipmap_zarr._store import (
     _extract_t_start,
     _find_raw_array,
     _open_store,
+    _write_source_metadata_dict,
 )
 from ecephys_mipmap_zarr.metadata import (
     DEFAULT_BUILD_CONFIG,
@@ -93,6 +94,7 @@ def build_mipmap(
     config: BuildConfig = DEFAULT_BUILD_CONFIG,
     quantization: QuantizationConfig = DEFAULT_QUANTIZATION_CONFIG,
     metadata_from: str | Path | None = None,
+    source_metadata: dict[str, Any] | None = None,
     progress: ProgressCallback | None = None,
 ) -> None:
     """Build a complete mipmap Zarr store from an array-like source.
@@ -125,6 +127,15 @@ def build_mipmap(
         Path or URI to a zarr store from which to copy source metadata
         (e.g. SpikeInterface probe geometry, channel IDs).  Useful
         when building from ``.dat``/``.cbin`` files that lack metadata.
+        Mutually exclusive with *source_metadata*.
+    source_metadata : dict or None, optional
+        In-memory metadata dict (e.g. from a SpikeInterface recording
+        that slices channels).  Schema: ``channel_ids`` (required),
+        and optionally ``location``, ``gain_to_uV``, ``offset_to_uV``,
+        ``t_start``, ``probe``, ``annotations``.  Used when the source
+        is derived from a processing chain whose channel set no longer
+        matches the underlying zarr (e.g. after bad-channel removal).
+        Mutually exclusive with *metadata_from*.
 
     Raises
     ------
@@ -346,11 +357,15 @@ def build_mipmap(
         )
 
     # Copy source metadata if requested
-    source_metadata: dict[str, Any] | None = None
+    if metadata_from is not None and source_metadata is not None:
+        msg = "metadata_from and source_metadata are mutually exclusive"
+        raise ValueError(msg)
+
+    attrs_source_metadata: dict[str, Any] | None = None
     t_start: float | None = None
     if metadata_from is not None:
         meta_root = _open_store(metadata_from, mode="r")
-        source_metadata = _extract_source_metadata(meta_root)
+        attrs_source_metadata = _extract_source_metadata(meta_root)
         t_start = _extract_t_start(meta_root)
         _copy_source_arrays(meta_root, root)
 
@@ -358,6 +373,17 @@ def build_mipmap(
         # When LSB shift is active, combine shift into gain scale.
         _apply_adc_quantization(meta_root, root, lsb_shift=raw_shift)
         _apply_adc_pyramid_quantization(meta_root, root, strides=strides, lsb_shift=pyr_shift)
+    elif source_metadata is not None:
+        _write_source_metadata_dict(
+            root,
+            source_metadata,
+            strides=strides,
+            raw_shift=raw_shift,
+            pyr_shift=pyr_shift,
+        )
+        t_start = source_metadata.get("t_start")
+        passthrough = {k: source_metadata[k] for k in ("probe", "annotations") if k in source_metadata}
+        attrs_source_metadata = passthrough if passthrough else None
 
     # Set root attributes
     attrs = MipmapAttrs(
@@ -367,7 +393,7 @@ def build_mipmap(
         n_samples=n_samples,
         n_channels=n_channels,
         dtype=dtype,
-        source_metadata=source_metadata,
+        source_metadata=attrs_source_metadata,
         t_start=t_start,
     )
     root.attrs.update(attrs.to_dict())

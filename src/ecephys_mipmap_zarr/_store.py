@@ -239,35 +239,37 @@ def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
             pass  # properties group doesn't have what we need
 
 
-def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group, lsb_shift: int = 0) -> None:
-    """Store ADC gain/offset as RawQuantization if gain_to_uV is available.
+def _read_gain_offset(src: zarr.Group) -> tuple[np.ndarray, np.ndarray] | None:
+    """Read ``gain_to_uV`` / ``offset_to_uV`` from an SI zarr.
 
-    When the source is an SI zarr with ``properties/gain_to_uV`` and
-    ``properties/offset_to_uV``, store these as :class:`RawQuantization`
-    in the destination's ``/raw`` array attrs.  This lets the reader
-    dequantize int16 ADC values to float32 µV transparently.
-
-    When *lsb_shift* > 0, the gain is multiplied by ``2**lsb_shift``
-    so that the reader's dequantization path handles both the bit-shift
-    reconstruction and unit conversion in a single step.
-
-    Parameters
-    ----------
-    src : zarr.Group
-        Source SI zarr store.
-    dst : zarr.Group
-        Destination mipmap store (must already contain ``/raw``).
-    lsb_shift : int, optional
-        LSB shift applied to raw data, by default 0.
+    Returns
+    -------
+    tuple or None
+        ``(gain, offset)`` as 1D float arrays, or ``None`` if either
+        array is missing.
     """
     try:
         props = src["properties"]
         gain = np.asarray(props["gain_to_uV"][:])  # type: ignore[index]
         offset = np.asarray(props["offset_to_uV"][:])  # type: ignore[index]
     except (KeyError, AttributeError):
-        return  # No gain/offset data available
+        return None
+    return gain, offset
 
-    # Combine lsb_shift into gain: effective_scale = gain * 2^shift
+
+def _write_raw_quantization(
+    dst: zarr.Group,
+    gain: np.ndarray,
+    offset: np.ndarray,
+    lsb_shift: int = 0,
+) -> None:
+    """Store gain/offset as :class:`RawQuantization` on the ``/raw`` array.
+
+    When *lsb_shift* > 0, the gain is multiplied by ``2**lsb_shift`` so
+    dequantization handles both bit-shift reconstruction and unit
+    conversion in a single step, and the standalone ``lsb_shift`` attr
+    is removed.
+    """
     effective_gain = gain * (1 << lsb_shift) if lsb_shift > 0 else gain
 
     try:
@@ -283,9 +285,6 @@ def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group, lsb_shift: int = 0
         quantized_dtype=raw_dtype,
     )
 
-    raw_array.attrs.update({"quantization": rq.to_dict()})
-    # When combined with lsb_shift, remove the standalone lsb_shift attr
-    # since dequantization via RawQuantization handles everything
     if lsb_shift > 0:
         existing = dict(raw_array.attrs)
         existing.pop("lsb_shift", None)
@@ -293,38 +292,18 @@ def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group, lsb_shift: int = 0
         existing["quantization"] = rq.to_dict()
         raw_array.attrs.clear()
         raw_array.attrs.update(existing)
+    else:
+        raw_array.attrs.update({"quantization": rq.to_dict()})
 
 
-def _apply_adc_pyramid_quantization(
-    src: zarr.Group,
+def _write_pyramid_quantization(
     dst: zarr.Group,
+    gain: np.ndarray,
+    offset: np.ndarray,
     strides: list[int],
     lsb_shift: int = 0,
 ) -> None:
-    """Store ADC gain/offset as LevelQuantization on pyramid arrays.
-
-    Analogous to :func:`_apply_adc_quantization` but for pyramid
-    ``/minmax/sN`` arrays.  Uses :class:`LevelQuantization` with
-    identical min/max offsets (ADC offset is the same for both axes).
-
-    Parameters
-    ----------
-    src : zarr.Group
-        Source SI zarr store with ``properties/gain_to_uV``.
-    dst : zarr.Group
-        Destination mipmap store with ``/minmax/sN`` arrays.
-    strides : list[int]
-        Pyramid strides (e.g. ``[32, 256, 2048, ...]``).
-    lsb_shift : int, optional
-        LSB shift applied to pyramid data, by default 0.
-    """
-    try:
-        props = src["properties"]
-        gain = np.asarray(props["gain_to_uV"][:])  # type: ignore[index]
-        offset = np.asarray(props["offset_to_uV"][:])  # type: ignore[index]
-    except (KeyError, AttributeError):
-        return
-
+    """Store gain/offset as :class:`LevelQuantization` on pyramid arrays."""
     effective_gain = gain * (1 << lsb_shift) if lsb_shift > 0 else gain
 
     for stride in strides:
@@ -348,3 +327,61 @@ def _apply_adc_pyramid_quantization(
         existing["quantization"] = lq.to_dict()
         mm_array.attrs.clear()
         mm_array.attrs.update(existing)
+
+
+def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group, lsb_shift: int = 0) -> None:
+    """Store ADC gain/offset as RawQuantization if gain_to_uV is available in *src*."""
+    pair = _read_gain_offset(src)
+    if pair is None:
+        return
+    gain, offset = pair
+    _write_raw_quantization(dst, gain, offset, lsb_shift=lsb_shift)
+
+
+def _apply_adc_pyramid_quantization(
+    src: zarr.Group,
+    dst: zarr.Group,
+    strides: list[int],
+    lsb_shift: int = 0,
+) -> None:
+    """Store ADC gain/offset as LevelQuantization on pyramid arrays if available in *src*."""
+    pair = _read_gain_offset(src)
+    if pair is None:
+        return
+    gain, offset = pair
+    _write_pyramid_quantization(dst, gain, offset, strides=strides, lsb_shift=lsb_shift)
+
+
+def _write_source_metadata_dict(
+    dst: zarr.Group,
+    metadata: dict[str, Any],
+    strides: list[int],
+    raw_shift: int = 0,
+    pyr_shift: int = 0,
+) -> None:
+    """Write source metadata (channel_ids, location, gain/offset) from an in-memory dict.
+
+    Dict schema (all keys optional except ``channel_ids``):
+
+    - ``channel_ids`` : 1D array of channel labels, required
+    - ``location``   : ``(C, 2)`` probe coordinates
+    - ``gain_to_uV`` / ``offset_to_uV`` : 1D float arrays for ADC
+      dequantization — both must be present together
+    - ``probe`` / ``annotations`` / ``t_start`` : passed through via the
+      caller into root attrs; not written here
+    """
+    ch_ids = np.asarray(metadata["channel_ids"])
+    dst.create_array("channel_ids", data=ch_ids, overwrite=True)
+
+    loc = metadata.get("location")
+    if loc is not None:
+        props = dst.require_group("properties")
+        props.create_array("location", data=np.asarray(loc), overwrite=True)
+
+    gain = metadata.get("gain_to_uV")
+    offset = metadata.get("offset_to_uV")
+    if gain is not None and offset is not None:
+        gain_arr = np.asarray(gain)
+        offset_arr = np.asarray(offset)
+        _write_raw_quantization(dst, gain_arr, offset_arr, lsb_shift=raw_shift)
+        _write_pyramid_quantization(dst, gain_arr, offset_arr, strides=strides, lsb_shift=pyr_shift)

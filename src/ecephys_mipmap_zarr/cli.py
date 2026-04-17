@@ -117,9 +117,15 @@ class BuildSettings:
     """
 
     input: str
-    """Input path: .dat (flat binary), .cbin (mtscomp), or .zarr."""
+    """Input path: .dat (flat binary), .cbin (mtscomp), .zarr, or SortingAnalyzer .zarr (with --from-analyzer)."""
     output: str
     """Output mipmap zarr store path."""
+    from_analyzer: bool = False
+    """Treat --input as a SortingAnalyzer zarr, stream the filtered chain via SpikeInterface."""
+    raw_path_override: str | None = None
+    """When --from-analyzer: URI/path to the raw zarr (required; substituted at the chain leaf)."""
+    keep_bad_channels: bool = False
+    """When --from-analyzer: peel off the outer ChannelSlice wrapper to keep dead+noise channels."""
     sampling_frequency: float | None = None
     """Sampling rate in Hz (auto-detected for .cbin)."""
     units: str = "uV"
@@ -155,10 +161,45 @@ class BuildSettings:
         """Run the build command."""
         source: Any
         input_path = Path(self.input)
+        built_source_metadata: dict[str, Any] | None = None
 
-        if _is_zarr_store(self.input):
+        if self.from_analyzer:
+            if self.raw_path_override is None:
+                console.print("[red]Error:[/red] --raw-path-override is required with --from-analyzer")
+                raise SystemExit(1)
+            from ecephys_mipmap_zarr.preprocess import (
+                SIRecordingSource,
+                build_source_metadata,
+                load_preprocessed_recording,
+            )
+
+            console.print(f"Loading analyzer: {self.input}")
+            console.print(f"  raw path: {self.raw_path_override}")
+            if self.keep_bad_channels:
+                console.print("  keep-bad-channels: unwrapping outer ChannelSlice")
+            rec = load_preprocessed_recording(
+                analyzer_path=self.input,
+                raw_path=self.raw_path_override,
+                keep_bad_channels=self.keep_bad_channels,
+                analyzer_storage_options={"anon": True} if self.input.startswith("s3://") else None,
+                raw_storage_options={"anon": True} if self.raw_path_override.startswith("s3://") else None,
+            )
+            source = SIRecordingSource(rec)
+            built_source_metadata = build_source_metadata(rec, self.raw_path_override)
+            dtype = str(rec.get_dtype())
+            n_samples, n_channels = source.shape
+            sampling_frequency = float(rec.get_sampling_frequency())
+            console.print(
+                f"  filtered chain: {n_samples:,} samples, {n_channels} channels, "
+                f"{dtype}, {sampling_frequency:.0f} Hz"
+            )
+
+        elif _is_zarr_store(self.input):
             from ecephys_mipmap_zarr._store import _open_store
 
+            if self.sampling_frequency is None:
+                console.print("[red]Error:[/red] --sampling-rate is required for zarr input")
+                raise SystemExit(1)
             console.print(f"Reading zarr store: {self.input}")
             root = _open_store(self.input, mode="r")
             raw_array = root[self.raw_path]
@@ -166,9 +207,6 @@ class BuildSettings:
             dtype = str(raw_array.dtype)  # type: ignore[union-attr]
             n_samples, n_channels = raw_array.shape  # type: ignore[union-attr]
             sampling_frequency = self.sampling_frequency
-            if sampling_frequency is None:
-                console.print("[red]Error:[/red] --sampling-rate is required for zarr input")
-                raise SystemExit(1)
             console.print(f"  shape: ({n_samples}, {n_channels}), dtype: {dtype}")
 
         elif input_path.suffix == ".cbin":
@@ -215,7 +253,8 @@ class BuildSettings:
                 dtype=dtype,
                 config=build_config,
                 quantization=quant_config,
-                metadata_from=self.metadata_from,
+                metadata_from=None if built_source_metadata is not None else self.metadata_from,
+                source_metadata=built_source_metadata,
                 progress=progress_fn,
             )
         console.print("[green]Done.[/green]")

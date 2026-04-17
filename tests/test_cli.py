@@ -223,6 +223,9 @@ class TestCLIParsing:
         assert parsed["data"] == {
             "input": "recording.dat",
             "output": "mipmap.zarr",
+            "from_analyzer": False,
+            "raw_path_override": None,
+            "keep_bad_channels": False,
             "sampling_frequency": 30000.0,
             "units": "uV",
             "n_samples": 10,

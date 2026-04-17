@@ -27,6 +27,11 @@ viewer = ["panel>=1.0", "bokeh>=3.0", "param"]
 cbin = ["mtscomp"]
 s3 = ["s3fs"]
 wavpack = ["wavpack-numcodecs"]
+si = [
+    "spikeinterface @ git+https://github.com/alejoe91/spikeinterface@zarrv3",
+    "scipy>=1.10",
+    "wavpack-numcodecs",
+]
 
 [project.scripts]
 ecephys-mipmap = "ecephys_mipmap_zarr.cli:main"
@@ -59,6 +64,9 @@ jupyter = [{ include-group = "dev" }, "ipykernel", "pip"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ecephys_mipmap_zarr"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.ruff]
 line-length = 120
@@ -110,7 +118,7 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
 [[tool.mypy.overrides]]
-module = ["zarr.*", "dask.*", "tyro.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*"]
+module = ["zarr.*", "dask.*", "tyro.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*", "spikeinterface.*"]
 ignore_missing_imports = true
 # zarr v3 generics are in flux; suppress type-arg errors in our build module
 [[tool.mypy.overrides]]
