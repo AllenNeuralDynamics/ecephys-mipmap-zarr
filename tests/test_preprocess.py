@@ -73,6 +73,23 @@ class TestSIRecordingSource:
         with pytest.raises(TypeError):
             _ = src[10:20]
 
+    def test_window_offset_and_duration(self):
+        rec = _FakeRecording(1000, 4)
+        src = SIRecordingSource(rec, start_sample=200, n_samples=300)
+        assert src.shape == (300, 4)
+        # Indices into the window map to the absolute frames
+        np.testing.assert_array_equal(src[0:10, :], rec.get_traces(start_frame=200, end_frame=210))
+        np.testing.assert_array_equal(src[50:75, :], rec.get_traces(start_frame=250, end_frame=275))
+        # Full window slice lines up with the underlying recording
+        np.testing.assert_array_equal(src[:, :], rec.get_traces(start_frame=200, end_frame=500))
+
+    def test_window_rejects_out_of_range(self):
+        rec = _FakeRecording(100, 4)
+        with pytest.raises(ValueError):
+            SIRecordingSource(rec, start_sample=200)
+        with pytest.raises(ValueError):
+            SIRecordingSource(rec, start_sample=50, n_samples=60)  # 50+60 > 100
+
 
 class TestFixLeaf:
     def test_substitutes_leaf_path(self):

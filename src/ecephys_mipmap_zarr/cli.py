@@ -126,6 +126,10 @@ class BuildSettings:
     """When --from-analyzer: URI/path to the raw zarr (required; substituted at the chain leaf)."""
     keep_bad_channels: bool = False
     """When --from-analyzer: peel off the outer ChannelSlice wrapper to keep dead+noise channels."""
+    start_seconds: float = 0.0
+    """When --from-analyzer: offset into the recording at which to start the mipmap (seconds)."""
+    duration_seconds: float | None = None
+    """When --from-analyzer: length of the window to include (seconds); default = rest of recording."""
     sampling_frequency: float | None = None
     """Sampling rate in Hz (auto-detected for .cbin)."""
     units: str = "uV"
@@ -184,13 +188,27 @@ class BuildSettings:
                 analyzer_storage_options={"anon": True} if self.input.startswith("s3://") else None,
                 raw_storage_options={"anon": True} if self.raw_path_override.startswith("s3://") else None,
             )
-            source = SIRecordingSource(rec)
+            sampling_frequency = float(rec.get_sampling_frequency())
+            full_samples = int(rec.get_num_samples())
+            start_sample = int(self.start_seconds * sampling_frequency)
+            capped_n_samples: int | None = (
+                int(self.duration_seconds * sampling_frequency) if self.duration_seconds is not None else None
+            )
+            source = SIRecordingSource(rec, start_sample=start_sample, n_samples=capped_n_samples)
             built_source_metadata = build_source_metadata(rec, self.raw_path_override)
+            assert built_source_metadata is not None
+            if start_sample > 0:
+                t0: float = built_source_metadata.get("t_start") or 0.0
+                built_source_metadata["t_start"] = t0 + start_sample / sampling_frequency
             dtype = str(rec.get_dtype())
             n_samples, n_channels = source.shape
-            sampling_frequency = float(rec.get_sampling_frequency())
+            clip_note = (
+                f" (from full {full_samples:,}, offset={start_sample:,})"
+                if n_samples < full_samples or start_sample > 0
+                else ""
+            )
             console.print(
-                f"  filtered chain: {n_samples:,} samples, {n_channels} channels, "
+                f"  filtered chain: {n_samples:,} samples{clip_note}, {n_channels} channels, "
                 f"{dtype}, {sampling_frequency:.0f} Hz"
             )
 

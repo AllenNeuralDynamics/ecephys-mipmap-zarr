@@ -226,6 +226,8 @@ class TestCLIParsing:
             "from_analyzer": False,
             "raw_path_override": None,
             "keep_bad_channels": False,
+            "start_seconds": 0.0,
+            "duration_seconds": None,
             "sampling_frequency": 30000.0,
             "units": "uV",
             "n_samples": 10,

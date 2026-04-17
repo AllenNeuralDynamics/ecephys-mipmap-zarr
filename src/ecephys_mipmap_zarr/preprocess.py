@@ -180,9 +180,27 @@ class SIRecordingSource:
     :meth:`BaseRecording.get_traces`.
     """
 
-    def __init__(self, rec: BaseRecording) -> None:
+    def __init__(
+        self,
+        rec: BaseRecording,
+        *,
+        start_sample: int = 0,
+        n_samples: int | None = None,
+    ) -> None:
         self._rec = rec
-        self._n_samples = int(rec.get_num_samples())
+        full_n = int(rec.get_num_samples())
+        if start_sample < 0 or start_sample >= full_n:
+            msg = f"start_sample={start_sample} out of range [0, {full_n})"
+            raise ValueError(msg)
+        self._start_sample = int(start_sample)
+        remaining = full_n - self._start_sample
+        if n_samples is None:
+            self._n_samples = remaining
+        else:
+            if n_samples < 0 or n_samples > remaining:
+                msg = f"n_samples={n_samples} out of range [0, {remaining}] given start_sample={start_sample}"
+                raise ValueError(msg)
+            self._n_samples = int(n_samples)
         self._n_channels = int(rec.get_num_channels())
         self._dtype: np.dtype[Any] = np.dtype(rec.get_dtype())
 
@@ -197,7 +215,12 @@ class SIRecordingSource:
         return self._dtype
 
     def __getitem__(self, key: Any) -> np.ndarray:
-        """Support ``src[t0:t1, :]`` indexing used by the engine."""
+        """Support ``src[t0:t1, :]`` indexing used by the engine.
+
+        Indices are interpreted relative to the window (``start_sample``);
+        they are shifted into absolute frames before delegating to
+        :meth:`BaseRecording.get_traces`.
+        """
         if not isinstance(key, tuple) or len(key) != 2:
             msg = f"SIRecordingSource only supports 2D slicing, got {type(key).__name__}"
             raise TypeError(msg)
@@ -207,7 +230,10 @@ class SIRecordingSource:
             raise TypeError(msg)
         start = t_key.start if t_key.start is not None else 0
         stop = t_key.stop if t_key.stop is not None else self._n_samples
-        traces = self._rec.get_traces(start_frame=int(start), end_frame=int(stop))
+        traces = self._rec.get_traces(
+            start_frame=int(start) + self._start_sample,
+            end_frame=int(stop) + self._start_sample,
+        )
         if ch_key != slice(None):
             traces = traces[:, ch_key]
         return np.asarray(traces)
