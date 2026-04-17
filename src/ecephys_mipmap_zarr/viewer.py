@@ -13,6 +13,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,102 @@ from bokeh.plotting import figure as bokeh_figure
 from ecephys_mipmap_zarr.read import MipmapStore, WindowResult, open_mipmap
 
 log = logging.getLogger(__name__)
+
+
+DEFAULT_BOKEH_PORT = 5006
+
+
+@dataclass
+class RemoteConfig:
+    """Configuration for running the viewer behind a reverse proxy.
+
+    Plain ``pn.serve(show=True)`` is fine for local use but breaks under
+    the proxies used by cloud IDEs (Code Ocean, JupyterHub with
+    ``jupyter-server-proxy``, etc.) because Bokeh rejects websocket
+    upgrades whose ``Origin`` is not in ``allow_websocket_origin`` and
+    generates asset URLs that assume a root-level mount.
+
+    Use :meth:`auto` to build a config that infers sensible defaults
+    from the environment (notably ``JUPYTERHUB_SERVICE_PREFIX``).
+
+    Parameters
+    ----------
+    port : int or None
+        Bind port.  ``None`` lets Panel pick a free port.
+    url_prefix : str or None
+        External URL prefix (e.g. ``/user/me/proxy/5006``) passed to
+        Panel as ``prefix``.  Needed when the app is mounted under a
+        path prefix by ``jupyter-server-proxy``.
+    allow_origin : list[str], "*", or None
+        Origins permitted to open a websocket.  ``None`` expands to
+        ``"*"`` (wildcard — wide-open, log warns).  For Code Ocean
+        code-server the bound URL's Origin is unpredictable, so
+        wildcard is usually the right choice.
+    """
+
+    port: int | None = None
+    url_prefix: str | None = None
+    allow_origin: list[str] | str | None = None
+
+    @classmethod
+    def auto(
+        cls,
+        *,
+        port: int | None = None,
+        url_prefix: str | None = None,
+        allow_origin: list[str] | str | None = None,
+    ) -> RemoteConfig:
+        """Construct a :class:`RemoteConfig` with environment-derived defaults.
+
+        - When ``url_prefix`` is not given and ``JUPYTERHUB_SERVICE_PREFIX``
+          is set, derive ``<hub_prefix>/proxy/<port>`` so Panel's asset
+          URLs resolve through ``jupyter-server-proxy``.
+        - Other fields pass through unchanged.
+        """
+        hub_prefix = os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
+        if url_prefix is None and hub_prefix:
+            resolved_port = port if port is not None else DEFAULT_BOKEH_PORT
+            url_prefix = f"{hub_prefix.rstrip('/')}/proxy/{resolved_port}"
+            log.info(
+                "auto-derived url_prefix from JUPYTERHUB_SERVICE_PREFIX: %s",
+                url_prefix,
+            )
+        return cls(port=port, url_prefix=url_prefix, allow_origin=allow_origin)
+
+    def to_serve_kwargs(self) -> dict[str, Any]:
+        """Return kwargs for :func:`panel.serve`.
+
+        When ``allow_origin`` is unset, default to ``"*"`` (wide open)
+        and warn via the module logger.
+        """
+        origin: list[str] | str
+        if self.allow_origin is None:
+            log.warning(
+                "RemoteConfig: allow_origin unset — using wildcard websocket origin (world-readable). "
+                "Pass a concrete hostname via allow_origin to tighten.",
+            )
+            origin = "*"
+        else:
+            origin = self.allow_origin
+
+        kwargs: dict[str, Any] = {
+            "address": "0.0.0.0",
+            "show": False,
+            "allow_websocket_origin": origin,
+        }
+        if self.port is not None:
+            kwargs["port"] = self.port
+        if self.url_prefix is not None:
+            kwargs["prefix"] = self.url_prefix
+        return kwargs
+
+    def describe_url(self) -> str:
+        """Return a human-readable description of the URL the app will be at."""
+        port = self.port if self.port is not None else DEFAULT_BOKEH_PORT
+        prefix = self.url_prefix or ""
+        if self.url_prefix:
+            return f"(via proxy) <host>{prefix} (bound on 0.0.0.0:{port})"
+        return f"http://<host>:{port}{prefix}"
 
 __all__ = [
     "SpikeData",
@@ -1228,15 +1325,30 @@ class TraceViewer:
         """
         return self._layout
 
-    def show(self, **kwargs: Any) -> None:
-        """Launch the viewer in a browser tab.
+    def show(self, *, remote: RemoteConfig | None = None, **kwargs: Any) -> None:
+        """Launch the viewer in a browser tab (or bind for a remote proxy).
 
         Parameters
         ----------
+        remote : RemoteConfig or None, optional
+            When set, configure :func:`panel.serve` for reverse-proxy
+            deployment: bind on ``0.0.0.0``, accept the configured
+            websocket origin, apply the URL prefix, and do NOT open a
+            local browser tab.  The expected URL is logged to the
+            module logger before the server starts.  When ``None``
+            (default), opens a local browser tab as usual.
         **kwargs
-            Passed to ``pn.serve()``.
+            Additional overrides forwarded to ``pn.serve()``.  Merged
+            on top of the remote-derived kwargs (user wins).
         """
-        pn.serve(self.panel(), show=True, **kwargs)
+        if remote is None:
+            pn.serve(self.panel(), show=True, **kwargs)
+            return
+
+        serve_kwargs = remote.to_serve_kwargs()
+        serve_kwargs.update(kwargs)
+        log.info("viewer: serving remotely — expected URL: %s", remote.describe_url())
+        pn.serve(self.panel(), **serve_kwargs)
 
 
 def _order_channels(

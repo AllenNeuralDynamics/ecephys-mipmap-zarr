@@ -287,5 +287,9 @@ class TestCLIParsing:
                 "channel_order": "depth",
                 "spikes_from": None,
                 "units": None,
+                "remote": False,
+                "port": None,
+                "url_prefix": None,
+                "allow_origin": None,
             },
         }

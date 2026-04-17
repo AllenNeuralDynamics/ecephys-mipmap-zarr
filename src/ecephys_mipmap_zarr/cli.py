@@ -410,11 +410,19 @@ class ViewSettings:
     """Path to phy/Kilosort output directory for spike overlay."""
     units: list[int] | None = None
     """Unit IDs to display (default: all). Channels auto-selected from spike templates."""
+    remote: bool = False
+    """Serve for access through a reverse proxy (cloud IDE / JupyterHub); binds on 0.0.0.0, no auto browser."""
+    port: int | None = None
+    """Fixed bind port (only with --remote; default: Panel picks free)."""
+    url_prefix: str | None = None
+    """External URL prefix for jupyter-server-proxy mounts (only with --remote)."""
+    allow_origin: list[str] | None = None
+    """Allowed websocket Origin hostnames (only with --remote; default: wildcard with warning)."""
 
     def cli_cmd(self) -> None:
         """Run the view command."""
         from ecephys_mipmap_zarr.read import open_mipmap
-        from ecephys_mipmap_zarr.viewer import TraceViewer, load_phy_spikes
+        from ecephys_mipmap_zarr.viewer import RemoteConfig, TraceViewer, load_phy_spikes
 
         store = open_mipmap(self.store_path, cache_dir=self.cache_dir, cache_max_gb=self.cache_max_gb)
         console.print(f"Opening viewer: {self.store_path}")
@@ -451,7 +459,21 @@ class ViewSettings:
             height=self.height,
             spike_data=spike_data,
         )
-        viewer.show()
+
+        if self.remote:
+            remote_config = RemoteConfig.auto(
+                port=self.port,
+                url_prefix=self.url_prefix,
+                allow_origin=self.allow_origin,
+            )
+            console.print(f"Serving remotely: {remote_config.describe_url()}")
+            viewer.show(remote=remote_config)
+        else:
+            if self.port is not None or self.url_prefix is not None or self.allow_origin is not None:
+                console.print(
+                    "[yellow]Warning:[/yellow] --port/--url-prefix/--allow-origin require --remote; ignoring."
+                )
+            viewer.show()
 
 
 CLICommand = Union[  # noqa: UP007 — Union required for tyro.cli() type resolution
