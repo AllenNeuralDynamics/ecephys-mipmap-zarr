@@ -350,22 +350,50 @@ class ViewSettings:
     """Cache directory for remote stores (auto-detected if omitted)."""
     cache_max_gb: float = 10
     """Maximum cache size in GB."""
+    spikes_from: str | None = None
+    """Path to phy/Kilosort output directory for spike overlay."""
+    units: list[int] | None = None
+    """Unit IDs to display (default: all). Channels auto-selected from spike templates."""
 
     def cli_cmd(self) -> None:
         """Run the view command."""
         from ecephys_mipmap_zarr.read import open_mipmap
-        from ecephys_mipmap_zarr.viewer import TraceViewer
+        from ecephys_mipmap_zarr.viewer import TraceViewer, load_phy_spikes
 
         store = open_mipmap(self.store_path, cache_dir=self.cache_dir, cache_max_gb=self.cache_max_gb)
         console.print(f"Opening viewer: {self.store_path}")
         console.print(f"  {store.n_samples:,} samples, {store.n_channels} channels, {store.sampling_frequency:.0f} Hz")
+
+        spike_data = None
+        initial_channels = None
+        if self.spikes_from is not None:
+            console.print(f"Loading spikes from: {self.spikes_from}")
+            spike_data, template_channels = load_phy_spikes(
+                self.spikes_from,
+                sampling_frequency=store.sampling_frequency,
+                unit_ids=self.units,
+                t_start=store.t_start,
+            )
+            n_spikes = sum(len(t) for t in spike_data.spike_times.values())
+            console.print(f"  {len(spike_data.spike_times)} units, {n_spikes:,} spikes")
+
+            # Auto-select initial view from templates (doesn't restrict panning)
+            if self.channels is None and self.units is not None:
+                all_chs: set[int] = set()
+                for chs in template_channels.values():
+                    all_chs.update(chs)
+                initial_channels = sorted(all_chs)
+                console.print(f"  Starting view on {len(initial_channels)} template channels")
+
         viewer = TraceViewer(
             store,
             channels=self.channels,
             n_channels=self.n_channels,
             channel_order=self.channel_order,
+            initial_channels=initial_channels,
             width=self.width,
             height=self.height,
+            spike_data=spike_data,
         )
         viewer.show()
 
@@ -378,6 +406,32 @@ CLICommand = Union[  # noqa: UP007 — Union required for tyro.cli() type resolu
 ]
 
 
+def _suppress_s3fs_shutdown_noise() -> None:
+    """Silence s3fs/aiohttp async teardown tracebacks at interpreter exit.
+
+    s3fs registers a weakref finalizer that tries to close the aiohttp
+    session, but at shutdown the event loop is already gone — producing
+    a harmless but noisy ``RuntimeError`` traceback on stderr.
+    """
+    import atexit
+    import os
+    import sys
+
+    def _quiet_exit() -> None:
+        # Only suppress if s3fs was actually imported
+        if "s3fs" not in sys.modules:
+            return
+        # Redirect stderr to devnull for the remaining weakref finalizers
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+        except OSError:
+            pass
+
+    atexit.register(_quiet_exit)
+
+
 def main() -> None:
     """CLI entry point."""
     import os
@@ -386,6 +440,8 @@ def main() -> None:
         import logging
 
         logging.basicConfig(level=logging.DEBUG, format="%(name)s %(levelname)s: %(message)s")
+
+    _suppress_s3fs_shutdown_noise()
 
     try:
         command = tyro.cli(

@@ -163,6 +163,26 @@ Without LSB shift (int16), baseline benchmarks on (C,T) layout:
 - **Delta encoding never helps** — bitshuffle already captures the temporal redundancy
 - **Shuffle selection is data-dependent**: low entropy → noshuffle, high entropy → bitshuffle, int16 pyramids → byte-shuffle
 
+## Phy/Kilosort spike data
+
+The viewer loads spike data from phy/Kilosort output directories via `load_phy_spikes()` and `--spikes-from` CLI flag. Key files:
+
+- `spike_times.npy` — `(N,)` int64, spike times in samples
+- `spike_clusters.npy` — `(N,)` int64, cluster ID per spike
+- `channel_map.npy` — `(C,)` int32, maps template channel indices to probe channel indices
+- `templates.npy` — `(n_templates, n_time, n_active_channels)` float64, mean waveform templates
+- `template_ind.npy` — `(n_templates, n_active_channels)` int32, which channel_map indices are active per template (-1 = padding)
+
+### Unit quality labels (AIND sorting pipeline)
+
+Three quality metrics determine a "good" unit:
+
+- **`cluster_KSLabel.tsv`**: Kilosort's own label — `"good"` or `"mua"` (multi-unit activity)
+- **`cluster_decoder_label.tsv`**: AIND decoder classification — `"sua"` (single-unit activity), `"mua"`, or `"noise"`. Uses a trained classifier on waveform features.
+- **`cluster_default_qc.tsv`**: Default quality control — `"True"` or `"False"`. Composite metric combining ISI violations, presence ratio, amplitude cutoff, etc.
+
+A high-confidence single unit has: KS=good, decoder=sua, default_qc=True.
+
 ## Key API
 
 `get_window(t0, t1, channels, num_points)` — the core read/tile function:

@@ -32,6 +32,7 @@ __all__ = [
     "SpikeData",
     "SpikeOverlay",
     "TraceViewer",
+    "load_phy_spikes",
     "view",
 ]
 
@@ -91,12 +92,14 @@ class SpikeOverlay:
         channel_offsets: npt.NDArray[Any],
         channel_spacing: float,
         channels: list[int],
+        t_start: float = 0.0,
     ) -> None:
         self._fig = figure
         self.spike_data = spike_data
         self._offsets = channel_offsets
         self._spacing = channel_spacing
         self._channels = channels
+        self._t_start = t_start
 
         # Build channel index → display index mapping
         self._ch_to_idx: dict[int, int] = {ch: i for i, ch in enumerate(channels)}
@@ -249,14 +252,16 @@ class SpikeOverlay:
 
             visible = times[(times >= x_start) & (times < x_end)]
             for t in visible:
-                t_sample = int(t * fs)
+                # Convert display time → sample index (subtract t_start)
+                t_sample = int((t - self._t_start) * fs)
                 s0 = max(t_sample - window_samples, result.t0_actual)
                 s1 = min(t_sample + window_samples, result.t1_actual)
                 idx0 = s0 - result.t0_actual
                 idx1 = s1 - result.t0_actual
                 if idx1 <= idx0:
                     continue
-                xs = np.linspace(s0 / fs, s1 / fs, idx1 - idx0)
+                # Convert sample indices back to display time for x coords
+                xs = np.linspace(s0 / fs + self._t_start, s1 / fs + self._t_start, idx1 - idx0)
                 ys = result.data[ch_idx, idx0:idx1] + offset
                 all_xs.append(xs)
                 all_ys.append(ys)
@@ -303,6 +308,7 @@ class TraceViewer:
         n_channels: int = 32,
         channel_spacing: float = 0.0,
         channel_order: str | list[int] | None = "depth",
+        initial_channels: list[int] | None = None,
         width: int = 1200,
         height: int = 800,
         spike_data: SpikeData | None = None,
@@ -317,15 +323,22 @@ class TraceViewer:
 
         # Resolve channels:
         # _all_channels = scrollable set (all store channels, or --channels subset)
-        # self.channels = currently visible subset (first n_channels of _all_channels)
+        # self.channels = currently visible subset
+        # initial_channels = starting view position (doesn't restrict scrolling)
         if channels is None:
             all_ch = list(range(store.n_channels))
         else:
             all_ch = list(channels)
         self._all_channels = _order_channels(all_ch, channel_order, store)
         self._ch_to_all_idx = {ch: i for i, ch in enumerate(self._all_channels)}
-        n_visible = min(n_channels, len(self._all_channels))
-        self.channels = list(self._all_channels[:n_visible])
+
+        if initial_channels is not None:
+            # Start viewing these channels, but allow panning to all
+            valid = [ch for ch in initial_channels if ch in self._ch_to_all_idx]
+            self.channels = valid if valid else list(self._all_channels[:n_channels])
+        else:
+            n_visible = min(n_channels, len(self._all_channels))
+            self.channels = list(self._all_channels[:n_visible])
 
         # Compute spacing
         if channel_spacing <= 0:
@@ -341,6 +354,7 @@ class TraceViewer:
         self._last_x_start = 0.0
         self._last_x_end = 0.0
         self._last_was_raw: bool | None = None
+        self._last_result: WindowResult | None = None  # cached for gain re-render
 
         # Background fetch executor — non-blocking data loading
         self._fetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="fetch")
@@ -364,9 +378,9 @@ class TraceViewer:
         self._spike_data = spike_data
         self._build_figure()
         self._fig_pane = pn.pane.Bokeh(self._fig)
-        self._scale_bar_widget = self._build_scale_bar()
+        self._scale_pane = pn.pane.Bokeh(self._scale_fig)
         self._controls = self._build_controls()
-        self._layout = pn.Row(self._fig_pane, pn.Column(self._scale_bar_widget, self._controls))
+        self._layout = pn.Row(self._fig_pane, self._scale_pane, self._controls)
 
         self._initial_render()
 
@@ -404,10 +418,21 @@ class TraceViewer:
         return self._all_offsets[indices]
 
     def _compute_scale_bar_value(self) -> float:
-        """Pick a nice round value for the scale bar."""
-        target = self.channel_spacing * 0.25 / max(self._gain, 0.01)
-        nice_values = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
-        return min(nice_values, key=lambda v: abs(v - target))
+        """Pick a nice round value for the scale bar (~75% of channel spacing)."""
+        target = self.channel_spacing * 0.75 / max(self._gain, 0.01)
+        # Round down to nearest nice value (multiples of 1, 2, 5 × powers of 10)
+        nice_values = [
+            0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500,
+            1000, 2000, 5000, 10000, 20000, 50000,
+        ]
+        # Pick largest nice value that doesn't exceed the target
+        result = nice_values[0]
+        for v in nice_values:
+            if v <= target:
+                result = v
+            else:
+                break
+        return result
 
     @staticmethod
     def _format_scale_label(value: float, units: str) -> str:
@@ -418,43 +443,71 @@ class TraceViewer:
             return f"{int(value)} {units}"
         return f"{value:g} {units}"
 
-    def _build_scale_bar(self) -> pn.Column:
-        """Build a scale bar widget for the controls panel."""
-        bar_value = self._compute_scale_bar_value()
-        units = self.store._attrs.units
-        bar_height_px = 60  # fixed pixel height for the bar
+    def _scale_units(self) -> str:
+        """Return the effective display units for the scale bar.
 
-        scale_fig = bokeh_figure(
-            width=80, height=bar_height_px + 40,
-            x_range=Range1d(0, 1), y_range=Range1d(0, 1),
-            tools="", toolbar_location=None,
+        When the store has ``RawQuantization`` (ADC → µV conversion),
+        the data is in physical units.  Otherwise (only ``lsb_shift``
+        or raw int), the data is in ADC units.
+        """
+        if self.store._raw_quantization is not None:
+            return self.store._attrs.units
+        return "ADC"
+
+    def _build_scale_bar(self) -> None:
+        """Build a narrow figure to the right of the main plot for the scale bar.
+
+        Shares ``y_range`` with the main figure so the bar stays
+        proportional on vertical pan and gain changes automatically.
+        """
+        bar_value = self._compute_scale_bar_value()
+        units = self._scale_units()
+
+        self._scale_fig = bokeh_figure(
+            width=80, height=self.height,
+            x_range=Range1d(0, 1),
+            y_range=self._fig.y_range,  # linked to main figure
+            tools="",
+            toolbar_location=None,
             outline_line_color=None,
         )
-        scale_fig.axis.visible = False
-        scale_fig.grid.visible = False
+        self._scale_fig.axis.visible = False
+        self._scale_fig.grid.visible = False
+        self._scale_fig.min_border_left = 0
+        self._scale_fig.min_border_right = 0
 
-        # Vertical bar centered horizontally
+        # Position bar near bottom of visible y-range
+        y_bottom = float(self._fig.y_range.start) + self.channel_spacing * 0.2  # type: ignore[arg-type]
+        y_top = y_bottom + bar_value * self._gain
+
         self._scale_bar_source = ColumnDataSource(
-            data={"x0": [0.3], "y0": [0.1], "x1": [0.3], "y1": [0.9]}
+            data={"x0": [0.5], "y0": [y_bottom], "x1": [0.5], "y1": [y_top]}
         )
-        scale_fig.segment(
+        self._scale_fig.segment(
             x0="x0", y0="y0", x1="x1", y1="y1",
             source=self._scale_bar_source,
             line_width=3, line_color="black",
         )
         self._scale_bar_label = Label(
-            x=0.4, y=0.35,
+            x=0.55, y=(y_bottom + y_top) / 2,
             text=self._format_scale_label(bar_value, units),
-            text_font_size="11px",
+            text_font_size="10px",
         )
-        scale_fig.add_layout(self._scale_bar_label)
-        self._scale_bar_fig = scale_fig
-        return pn.Column(pn.pane.Bokeh(scale_fig), width=100)
+        self._scale_fig.add_layout(self._scale_bar_label)
 
     def _update_scale_bar(self) -> None:
-        """Update the scale bar label when gain changes."""
+        """Recompute scale bar value and position for current gain."""
         bar_value = self._compute_scale_bar_value()
-        units = self.store._attrs.units
+        units = self._scale_units()
+
+        y_bottom = float(self._fig.y_range.start) + self.channel_spacing * 0.2  # type: ignore[arg-type]
+        y_top = y_bottom + bar_value * self._gain
+
+        self._scale_bar_source.data = {
+            "x0": [0.5], "y0": [y_bottom],
+            "x1": [0.5], "y1": [y_top],
+        }
+        self._scale_bar_label.y = (y_bottom + y_top) / 2
         self._scale_bar_label.text = self._format_scale_label(bar_value, units)
 
     def _build_figure(self) -> None:
@@ -535,11 +588,15 @@ class TraceViewer:
         self._fig.y_range.on_change("start", self._on_y_range_change)  # type: ignore[arg-type]
         self._fig.y_range.on_change("end", self._on_y_range_change)  # type: ignore[arg-type]
 
+        # Scale bar figure — shares y_range with main figure
+        self._build_scale_bar()
+
         # Create spike overlay if spike data provided
         self._spike_overlay: SpikeOverlay | None = None
         if self._spike_data is not None:
             self._spike_overlay = SpikeOverlay(
-                self._fig, self._spike_data, self._offsets, self.channel_spacing, self.channels
+                self._fig, self._spike_data, self._offsets, self.channel_spacing, self.channels,
+                t_start=self.store.t_start,
             )
 
     def _initial_render(self) -> None:
@@ -644,6 +701,9 @@ class TraceViewer:
                     self._envelope_glyphs[i].visible = False
                     self._line_glyphs[i].visible = False
 
+        # Reposition scale bar to stay at bottom of viewport
+        self._update_scale_bar()
+
         # --- Handle x-range changes (threshold skip) ---
         if not channels_changed:
             log.debug("viewport_update: x=[%.2f, %.2f]", x_start, x_end)
@@ -742,6 +802,7 @@ class TraceViewer:
                 t_apply_start = _time.perf_counter()
                 self._last_x_start = x_start
                 self._last_x_end = x_end
+                self._last_result = result
 
                 # Apply pre-computed display data (colors are slot-based, never change)
                 use_envelope = display["mode"] == "envelope"
@@ -805,6 +866,7 @@ class TraceViewer:
 
         self._last_x_start = x_start
         self._last_x_end = x_end
+        self._last_result = result
 
         use_envelope = display["mode"] == "envelope"
         n_ch = len(channels)
@@ -1010,20 +1072,29 @@ class TraceViewer:
             new_data[f"y2_{i}"] = maxs[i, :] * gain + offsets[i]
         return {"mode": "envelope", "data": self._pad_source_data(new_data, "envelope", n_ch)}
 
-    def _update_layout(self) -> None:
-        """Recompute offsets and y-range after spacing/gain change."""
-        self._offsets = self._compute_channel_offsets()
-        self._fig.y_range.start = float(self._offsets[-1] - self.channel_spacing)  # type: ignore[assignment]
-        self._fig.y_range.end = float(self._offsets[0] + self.channel_spacing)  # type: ignore[assignment]
-        self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())  # type: ignore[assignment]
-        self._fig.yaxis.major_label_overrides = {
-            float(self._offsets[i]): str(self.channels[i]) for i in range(len(self.channels))
-        }
-        # Re-render with current viewport
-        self._update_data(
-            float(self._fig.x_range.start),  # type: ignore[arg-type]
-            float(self._fig.x_range.end),  # type: ignore[arg-type]
+    def _rerender_from_cache(self) -> None:
+        """Re-prepare and apply display data from the cached result.
+
+        Used when gain changes — the underlying data hasn't changed,
+        only the scaling.  Avoids a redundant fetch.
+        """
+        if self._last_result is None:
+            return
+        channels = list(self.channels)
+        display = self._prepare_display_data(
+            self._last_result, channels=channels, offsets=self._offsets.copy(), gain=self._gain
         )
+        use_envelope = display["mode"] == "envelope"
+        n_ch = len(channels)
+        if self._last_was_raw is not (not use_envelope):
+            for i in range(self._max_glyphs):
+                self._envelope_glyphs[i].visible = use_envelope and i < n_ch
+                self._line_glyphs[i].visible = (not use_envelope) and i < n_ch
+        if use_envelope:
+            self._envelope_source.data = display["data"]
+        else:
+            self._line_source.data = display["data"]
+        self._last_was_raw = not use_envelope
 
     def set_channels(self, channels: list[int]) -> None:
         """Change which channels are displayed.
@@ -1094,15 +1165,18 @@ class TraceViewer:
         self._request_update(x_start, x_end)
 
     def set_gain(self, gain: float) -> None:
-        """Change the amplitude gain (channel spacing multiplier).
+        """Change the amplitude gain.
+
+        Re-renders from the cached result without fetching.
 
         Parameters
         ----------
         gain : float
-            Gain multiplier (1.0 = default spacing).
+            Gain multiplier (1.0 = default).
         """
         self._gain = gain
-        self._update_layout()
+        self._rerender_from_cache()
+        self._update_scale_bar()
 
     def _build_controls(self) -> pn.Column:
         """Build the control panel widgets."""
@@ -1213,6 +1287,76 @@ def _order_channels(
     raise ValueError(msg)
 
 
+
+
+def load_phy_spikes(
+    phy_dir: str | Path,
+    sampling_frequency: float = 30000.0,
+    unit_ids: list[int] | None = None,
+    t_start: float = 0.0,
+) -> tuple[SpikeData, dict[str, list[int]]]:
+    """Load spike data from a phy/Kilosort output directory.
+
+    Parameters
+    ----------
+    phy_dir : str or Path
+        Path to phy output directory containing ``spike_times.npy``,
+        ``spike_clusters.npy``, ``channel_map.npy``, ``templates.npy``,
+        and ``template_ind.npy``.
+    sampling_frequency : float, optional
+        Sampling rate in Hz, by default 30000.
+    unit_ids : list[int] or None, optional
+        Subset of unit IDs to load.  ``None`` loads all units.
+    t_start : float, optional
+        Recording start time in seconds.  Added to spike times so they
+        align with the viewer's time axis.  Pass ``store.t_start``.
+
+    Returns
+    -------
+    spike_data : SpikeData
+    template_channels : dict[str, list[int]]
+        Mapping of unit ID to active channel indices (channels where
+        the template amplitude exceeds 10% of peak).
+    """
+    phy_path = Path(phy_dir)
+    spike_times_samples = np.load(phy_path / "spike_times.npy").flatten()
+    spike_clusters = np.load(phy_path / "spike_clusters.npy").flatten()
+    channel_map = np.load(phy_path / "channel_map.npy").flatten()
+    templates = np.load(phy_path / "templates.npy")
+    template_ind = np.load(phy_path / "template_ind.npy")
+
+    # Peak channel per template: channel with largest absolute amplitude
+    # argmax gives index into the active channel axis → look up via template_ind → channel_map
+    n_cm = len(channel_map)
+    peak_active_idx = np.argmax(np.abs(templates).max(axis=1), axis=1)
+    peak_channels = np.array([
+        channel_map[template_ind[i, peak_active_idx[i]]]
+        if 0 <= template_ind[i, peak_active_idx[i]] < n_cm else 0
+        for i in range(len(templates))
+    ])
+
+    all_unit_ids = np.unique(spike_clusters)
+    if unit_ids is not None:
+        all_unit_ids = np.array([u for u in all_unit_ids if u in set(unit_ids)])
+
+    spike_times_dict: dict[str, npt.NDArray[Any]] = {}
+    unit_channels: dict[str, int] = {}
+    template_channels: dict[str, list[int]] = {}
+    for uid in all_unit_ids:
+        mask = spike_clusters == uid
+        spike_times_dict[str(uid)] = spike_times_samples[mask] / sampling_frequency + t_start
+        unit_channels[str(uid)] = int(peak_channels[uid])
+
+        # Active channels: where template amplitude > 10% of peak
+        t = templates[uid]  # (n_time, n_active)
+        peak_amp = np.abs(t).max(axis=0)
+        threshold = peak_amp.max() * 0.1
+        active_idx = template_ind[uid][peak_amp > threshold]
+        # Filter out -1 padding entries, map through channel_map
+        active_chs = [int(channel_map[i]) for i in active_idx if 0 <= i < n_cm]
+        template_channels[str(uid)] = sorted(active_chs)
+
+    return SpikeData(spike_times=spike_times_dict, unit_channels=unit_channels), template_channels
 
 
 def view(

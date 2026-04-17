@@ -280,5 +280,7 @@ class TestCLIParsing:
                 "cache_dir": None,
                 "cache_max_gb": 10.0,
                 "channel_order": "depth",
+                "spikes_from": None,
+                "units": None,
             },
         }
