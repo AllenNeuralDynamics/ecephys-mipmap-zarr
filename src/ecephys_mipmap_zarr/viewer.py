@@ -54,16 +54,17 @@ class RemoteConfig:
         External URL prefix (e.g. ``/user/me/proxy/5006``) passed to
         Panel as ``prefix``.  Needed when the app is mounted under a
         path prefix by ``jupyter-server-proxy``.
-    allow_origin : list[str], "*", or None
+    allow_origin : list[str] or None
         Origins permitted to open a websocket.  ``None`` expands to
-        ``"*"`` (wildcard — wide-open, log warns).  For Code Ocean
-        code-server the bound URL's Origin is unpredictable, so
-        wildcard is usually the right choice.
+        ``["*"]`` (wildcard — wide-open, log warns).  Pass ``["*"]``
+        explicitly to silence the warning.  For Code Ocean code-server
+        the bound URL's Origin is unpredictable, so wildcard is usually
+        the right choice.
     """
 
     port: int | None = None
     url_prefix: str | None = None
-    allow_origin: list[str] | str | None = None
+    allow_origin: list[str] | None = None
 
     @classmethod
     def auto(
@@ -71,7 +72,7 @@ class RemoteConfig:
         *,
         port: int | None = None,
         url_prefix: str | None = None,
-        allow_origin: list[str] | str | None = None,
+        allow_origin: list[str] | None = None,
     ) -> RemoteConfig:
         """Construct a :class:`RemoteConfig` with environment-derived defaults.
 
@@ -93,16 +94,16 @@ class RemoteConfig:
     def to_serve_kwargs(self) -> dict[str, Any]:
         """Return kwargs for :func:`panel.serve`.
 
-        When ``allow_origin`` is unset, default to ``"*"`` (wide open)
-        and warn via the module logger.
+        When ``allow_origin`` is unset, default to ``["*"]`` (wide open)
+        and warn via the module logger.  Bokeh's ``allow_websocket_origin``
+        requires a list — a bare ``"*"`` string fails validation.
         """
-        origin: list[str] | str
         if self.allow_origin is None:
             log.warning(
                 "RemoteConfig: allow_origin unset — using wildcard websocket origin (world-readable). "
                 "Pass a concrete hostname via allow_origin to tighten.",
             )
-            origin = "*"
+            origin = ["*"]
         else:
             origin = self.allow_origin
 

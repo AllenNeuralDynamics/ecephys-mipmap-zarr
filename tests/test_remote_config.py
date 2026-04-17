@@ -19,7 +19,7 @@ class TestToServeKwargs:
             kwargs = rc.to_serve_kwargs()
         assert kwargs["address"] == "0.0.0.0"
         assert kwargs["show"] is False
-        assert kwargs["allow_websocket_origin"] == "*"
+        assert kwargs["allow_websocket_origin"] == ["*"]
         assert "port" not in kwargs
         assert "prefix" not in kwargs
         assert any("wildcard" in rec.message.lower() for rec in caplog.records)
@@ -31,10 +31,10 @@ class TestToServeKwargs:
         assert kwargs["prefix"] == "/proxy/5010"
         assert kwargs["allow_websocket_origin"] == ["example.com"]
 
-    def test_allow_origin_wildcard_string_passes_through(self):
-        rc = RemoteConfig(allow_origin="*")
+    def test_explicit_wildcard_list_passes_through(self):
+        rc = RemoteConfig(allow_origin=["*"])
         kwargs = rc.to_serve_kwargs()
-        assert kwargs["allow_websocket_origin"] == "*"
+        assert kwargs["allow_websocket_origin"] == ["*"]
 
 
 class TestAutoFromEnv:
