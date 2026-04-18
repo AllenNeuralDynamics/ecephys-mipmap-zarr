@@ -346,10 +346,7 @@ def _unwrap_outer_channelslice(prov: dict[str, Any]) -> dict[str, Any]:
 
     kept = kwargs.get("channel_ids")
     inner_kwargs = inner.get("kwargs", {})
-    inner_channels = (
-        inner.get("properties", {}).get("channel_ids")
-        or inner_kwargs.get("channel_ids")
-    )
+    inner_channels = inner.get("properties", {}).get("channel_ids") or inner_kwargs.get("channel_ids")
     if kept is not None and inner_channels is not None:
         dropped = [cid for cid in inner_channels if cid not in kept]
         if dropped:

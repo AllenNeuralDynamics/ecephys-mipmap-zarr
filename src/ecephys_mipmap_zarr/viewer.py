@@ -127,6 +127,7 @@ class RemoteConfig:
             return f"(via proxy) <host>{prefix} (bound on 0.0.0.0:{port})"
         return f"http://<host>:{port}{prefix}"
 
+
 __all__ = [
     "SpikeData",
     "SpikeOverlay",
@@ -521,8 +522,24 @@ class TraceViewer:
         target = self.channel_spacing * 0.75 / max(self._gain, 0.01)
         # Round down to nearest nice value (multiples of 1, 2, 5 × powers of 10)
         nice_values = [
-            0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500,
-            1000, 2000, 5000, 10000, 20000, 50000,
+            0.1,
+            0.2,
+            0.5,
+            1,
+            2,
+            5,
+            10,
+            20,
+            50,
+            100,
+            200,
+            500,
+            1000,
+            2000,
+            5000,
+            10000,
+            20000,
+            50000,
         ]
         # Pick largest nice value that doesn't exceed the target
         result = nice_values[0]
@@ -563,7 +580,8 @@ class TraceViewer:
         units = self._scale_units()
 
         self._scale_fig = bokeh_figure(
-            width=80, height=self.height,
+            width=80,
+            height=self.height,
             x_range=Range1d(0, 1),
             y_range=self._fig.y_range,  # linked to main figure
             tools="",
@@ -579,16 +597,19 @@ class TraceViewer:
         y_bottom = float(self._fig.y_range.start) + self.channel_spacing * 0.2  # type: ignore[arg-type]
         y_top = y_bottom + bar_value * self._gain
 
-        self._scale_bar_source = ColumnDataSource(
-            data={"x0": [0.5], "y0": [y_bottom], "x1": [0.5], "y1": [y_top]}
-        )
+        self._scale_bar_source = ColumnDataSource(data={"x0": [0.5], "y0": [y_bottom], "x1": [0.5], "y1": [y_top]})
         self._scale_fig.segment(
-            x0="x0", y0="y0", x1="x1", y1="y1",
+            x0="x0",
+            y0="y0",
+            x1="x1",
+            y1="y1",
             source=self._scale_bar_source,
-            line_width=3, line_color="black",
+            line_width=3,
+            line_color="black",
         )
         self._scale_bar_label = Label(
-            x=0.55, y=(y_bottom + y_top) / 2,
+            x=0.55,
+            y=(y_bottom + y_top) / 2,
             text=self._format_scale_label(bar_value, units),
             text_font_size="10px",
         )
@@ -603,8 +624,10 @@ class TraceViewer:
         y_top = y_bottom + bar_value * self._gain
 
         self._scale_bar_source.data = {
-            "x0": [0.5], "y0": [y_bottom],
-            "x1": [0.5], "y1": [y_top],
+            "x0": [0.5],
+            "y0": [y_bottom],
+            "x1": [0.5],
+            "y1": [y_top],
         }
         self._scale_bar_label.y = (y_bottom + y_top) / 2
         self._scale_bar_label.text = self._format_scale_label(bar_value, units)
@@ -618,9 +641,12 @@ class TraceViewer:
         """
         i = len(self._envelope_glyphs)
         g = self._fig.varea(
-            x="x", y1=f"y1_{i}", y2=f"y2_{i}",
+            x="x",
+            y1=f"y1_{i}",
+            y2=f"y2_{i}",
             source=self._envelope_source,
-            fill_alpha=0.7, color="black",
+            fill_alpha=0.7,
+            color="black",
         )
         g.visible = False
         self._envelope_glyphs.append(g)
@@ -629,8 +655,11 @@ class TraceViewer:
             (f"y1_{i}", self._envelope_bottom_lines),
         ):
             line = self._fig.line(
-                x="x", y=col, source=self._envelope_source,
-                line_width=1.0, color="black",
+                x="x",
+                y=col,
+                source=self._envelope_source,
+                line_width=1.0,
+                color="black",
             )
             line.visible = False
             target.append(line)
@@ -639,9 +668,11 @@ class TraceViewer:
         """Append a new raw-mode line glyph slot."""
         i = len(self._line_glyphs)
         g = self._fig.line(
-            x="x", y=f"y_{i}",
+            x="x",
+            y=f"y_{i}",
             source=self._line_source,
-            line_width=0.5, color="black",
+            line_width=0.5,
+            color="black",
         )
         g.visible = False
         self._line_glyphs.append(g)
@@ -722,7 +753,11 @@ class TraceViewer:
         self._spike_overlay: SpikeOverlay | None = None
         if self._spike_data is not None:
             self._spike_overlay = SpikeOverlay(
-                self._fig, self._spike_data, self._offsets, self.channel_spacing, self.channels,
+                self._fig,
+                self._spike_data,
+                self._offsets,
+                self.channel_spacing,
+                self.channels,
                 t_start=self.store.t_start,
             )
 
@@ -786,7 +821,9 @@ class TraceViewer:
                 channels_changed = True
                 log.debug(
                     "viewport_update: y=[%.1f, %.1f], %d channels visible",
-                    y_start, y_end, len(new_channels),
+                    y_start,
+                    y_end,
+                    len(new_channels),
                 )
                 self.channels = new_channels
                 self._offsets = self._all_offsets[visible_indices]
@@ -975,9 +1012,7 @@ class TraceViewer:
 
         channels = list(self.channels)
         result = self.store.get_window(t0, t1, channels=channels, num_points=self.width)
-        display = self._prepare_display_data(
-            result, channels=channels, offsets=self._offsets.copy(), gain=self._gain
-        )
+        display = self._prepare_display_data(result, channels=channels, offsets=self._offsets.copy(), gain=self._gain)
 
         self._last_x_start = x_start
         self._last_x_end = x_end
@@ -1243,9 +1278,7 @@ class TraceViewer:
         self._fig.yaxis.ticker = FixedTicker(ticks=self._offsets.tolist())  # type: ignore[assignment]
         self._fig.yaxis.major_label_overrides = {  # type: ignore[attr-defined]
             float(self._offsets[i]): (
-                str(self._channel_ids[self.channels[i]])
-                if self._channel_ids is not None
-                else str(self.channels[i])
+                str(self._channel_ids[self.channels[i]]) if self._channel_ids is not None else str(self.channels[i])
             )
             for i in range(n_ch)
         }
@@ -1400,8 +1433,6 @@ def _order_channels(
     raise ValueError(msg)
 
 
-
-
 def load_phy_spikes(
     phy_dir: str | Path,
     sampling_frequency: float = 30000.0,
@@ -1442,11 +1473,12 @@ def load_phy_spikes(
     # argmax gives index into the active channel axis → look up via template_ind → channel_map
     n_cm = len(channel_map)
     peak_active_idx = np.argmax(np.abs(templates).max(axis=1), axis=1)
-    peak_channels = np.array([
-        channel_map[template_ind[i, peak_active_idx[i]]]
-        if 0 <= template_ind[i, peak_active_idx[i]] < n_cm else 0
-        for i in range(len(templates))
-    ])
+    peak_channels = np.array(
+        [
+            channel_map[template_ind[i, peak_active_idx[i]]] if 0 <= template_ind[i, peak_active_idx[i]] < n_cm else 0
+            for i in range(len(templates))
+        ]
+    )
 
     all_unit_ids = np.unique(spike_clusters)
     if unit_ids is not None:

@@ -290,7 +290,10 @@ class BuildSettings:
             sampling_frequency = float(rec.get_sampling_frequency())
             full_samples = int(rec.get_num_samples())
             start_sample, capped_n_samples = _resolve_window(
-                self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
+                self.start_seconds,
+                self.duration_seconds,
+                sampling_frequency,
+                full_samples,
             )
             source = SIRecordingSource(rec, start_sample=start_sample, n_samples=capped_n_samples)
             built_source_metadata = build_source_metadata(rec)
@@ -321,7 +324,11 @@ class BuildSettings:
             sampling_frequency = self.sampling_frequency
             console.print(f"  shape: ({full_samples}, {n_channels}), dtype: {dtype}")
             source, n_samples = _maybe_window_source(
-                source, self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
+                source,
+                self.start_seconds,
+                self.duration_seconds,
+                sampling_frequency,
+                full_samples,
             )
 
         elif input_path.suffix == ".cbin":
@@ -332,7 +339,11 @@ class BuildSettings:
                 f"{dtype}, {sampling_frequency:.0f} Hz)"
             )
             source, n_samples = _maybe_window_source(
-                source, self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
+                source,
+                self.start_seconds,
+                self.duration_seconds,
+                sampling_frequency,
+                full_samples,
             )
 
         else:
@@ -349,7 +360,11 @@ class BuildSettings:
             console.print(f"Reading binary: {self.input} ({full_samples:,} samples, {n_channels} channels, {dtype})")
             source = np.memmap(self.input, dtype=dtype, mode="r", shape=(full_samples, n_channels))
             source, n_samples = _maybe_window_source(
-                source, self.start_seconds, self.duration_seconds, sampling_frequency, full_samples,
+                source,
+                self.start_seconds,
+                self.duration_seconds,
+                sampling_frequency,
+                full_samples,
             )
 
         if n_samples < full_samples:
