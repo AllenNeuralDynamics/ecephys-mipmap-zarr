@@ -242,7 +242,7 @@ class TestCLIParsing:
             "lsb_shift_pyramid": "auto",
             "noise_floor": None,
             "clip_outliers": True,
-            "prefetch_chunks": 0,
+            "prefetch_chunks": -1,
             "wavpack_decode_threads": 4,
         }
 

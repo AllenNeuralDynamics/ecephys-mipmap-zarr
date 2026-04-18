@@ -62,6 +62,19 @@ def _is_zarr_store(path: str) -> bool:
     return p.suffix == ".zarr" or (p / "zarr.json").exists()
 
 
+def _resolve_prefetch_chunks(value: int, source_path: str) -> int:
+    """Resolve ``prefetch_chunks``, treating ``-1`` as auto.
+
+    Auto expands to 3 for remote URIs (``"://"`` in *source_path*) and 0
+    for local paths.  Overlapping a couple of WavPack/S3 decodes is worth
+    the extra in-flight memory when the bottleneck is network+decode; it
+    only adds scheduling overhead on a local nvme.
+    """
+    if value >= 0:
+        return value
+    return 3 if "://" in source_path else 0
+
+
 def _resolve_window(
     start_seconds: float,
     duration_seconds: float | None,
@@ -254,8 +267,8 @@ class BuildSettings:
     """Explicit noise floor in ADC RMS units (overrides auto-detection)."""
     clip_outliers: bool = True
     """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
-    prefetch_chunks: int = 0
-    """Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)."""
+    prefetch_chunks: int = -1
+    """Prefetch N source chunks in background threads (-1=auto: 3 remote / 0 local; 0=disabled)."""
     wavpack_decode_threads: int = 4
     """Threads for WavPack decode on --from-analyzer sources (1=single-threaded)."""
 
@@ -373,6 +386,7 @@ class BuildSettings:
                 f"duration {n_samples / sampling_frequency:.3f}s)"
             )
 
+        prefetch_chunks = _resolve_prefetch_chunks(self.prefetch_chunks, self.input)
         console.print(f"Building mipmap → {self.output}")
         build_config = BuildConfig(
             compressor=self.compressor,
@@ -380,7 +394,7 @@ class BuildSettings:
             lsb_shift_pyramid=self.lsb_shift_pyramid,
             noise_floor=self.noise_floor,
             clip_outliers=self.clip_outliers,
-            prefetch_chunks=self.prefetch_chunks,
+            prefetch_chunks=prefetch_chunks,
         )
         quant_config = QuantizationConfig(
             quantize=self.quantize,
@@ -427,11 +441,12 @@ class AddPyramidSettings:
     """Explicit noise floor in ADC RMS units (overrides auto-detection)."""
     clip_outliers: bool = True
     """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
-    prefetch_chunks: int = 0
-    """Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)."""
+    prefetch_chunks: int = -1
+    """Prefetch N source chunks in background threads (-1=auto: 3 remote / 0 local; 0=disabled)."""
 
     def cli_cmd(self) -> None:
         """Run the add-pyramid command."""
+        prefetch_chunks = _resolve_prefetch_chunks(self.prefetch_chunks, self.raw_store)
         console.print(f"Reading raw from: {self.raw_store}")
         console.print(f"Building pyramids → {self.output}")
         build_config = BuildConfig(
@@ -439,7 +454,7 @@ class AddPyramidSettings:
             lsb_shift_pyramid=self.lsb_shift_pyramid,
             noise_floor=self.noise_floor,
             clip_outliers=self.clip_outliers,
-            prefetch_chunks=self.prefetch_chunks,
+            prefetch_chunks=prefetch_chunks,
         )
         quant_config = QuantizationConfig(
             quantize=self.quantize,

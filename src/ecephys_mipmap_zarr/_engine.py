@@ -365,14 +365,18 @@ def _create_zarr_array(
 
 @dataclass
 class _AccumulatedStats:
-    """Mutable accumulator for per-channel min/max statistics."""
+    """Mutable accumulator for per-channel min/max statistics.
 
-    raw_min: npt.NDArray[Any]
-    raw_max: npt.NDArray[Any]
-    mm_min_min: npt.NDArray[Any]  # min of the min-axis values
+    The four ``mm_*`` fields track extrema of the finest pyramid's
+    min/max axes.  Per-channel ``raw_min`` / ``raw_max`` are *not* stored
+    separately: they equal ``mm_min_min`` / ``mm_max_max`` exactly
+    (min-of-block-mins = global min, max-of-block-maxes = global max).
+    """
+
+    mm_min_min: npt.NDArray[Any]  # min of the min-axis values (= per-channel raw min)
     mm_min_max: npt.NDArray[Any]  # max of the min-axis values
     mm_max_min: npt.NDArray[Any]  # min of the max-axis values
-    mm_max_max: npt.NDArray[Any]  # max of the max-axis values
+    mm_max_max: npt.NDArray[Any]  # max of the max-axis values (= per-channel raw max)
 
     @classmethod
     def create(cls, n_channels: int, source_dtype: str) -> _AccumulatedStats:
@@ -383,18 +387,21 @@ class _AccumulatedStats:
         else:
             big = float(np.iinfo(dt).max)
         return cls(
-            raw_min=np.full(n_channels, big, dtype=np.float64),
-            raw_max=np.full(n_channels, -big, dtype=np.float64),
             mm_min_min=np.full(n_channels, big, dtype=np.float64),
             mm_min_max=np.full(n_channels, -big, dtype=np.float64),
             mm_max_min=np.full(n_channels, big, dtype=np.float64),
             mm_max_max=np.full(n_channels, -big, dtype=np.float64),
         )
 
-    def update_raw(self, chunk: npt.NDArray[Any]) -> None:
-        """Update raw stats from a (C, T) chunk."""
-        np.minimum(self.raw_min, chunk.min(axis=1), out=self.raw_min)
-        np.maximum(self.raw_max, chunk.max(axis=1), out=self.raw_max)
+    @property
+    def raw_min(self) -> npt.NDArray[Any]:
+        """Per-channel raw minimum (identical to ``mm_min_min``)."""
+        return self.mm_min_min
+
+    @property
+    def raw_max(self) -> npt.NDArray[Any]:
+        """Per-channel raw maximum (identical to ``mm_max_max``)."""
+        return self.mm_max_max
 
     def update_minmax(self, mm: npt.NDArray[Any]) -> None:
         """Update minmax stats from a (C, 2, B) block."""
@@ -581,9 +588,9 @@ def _write_raw_and_compute_finest(
         else:
             collected.append(mm)
 
-        # Accumulate stats
+        # Accumulate stats — mm extremes double as raw extremes (see
+        # _AccumulatedStats docstring), so only one update call is needed.
         if stats is not None:
-            stats.update_raw(chunk)
             stats.update_minmax(mm)
 
         if progress is not None:
