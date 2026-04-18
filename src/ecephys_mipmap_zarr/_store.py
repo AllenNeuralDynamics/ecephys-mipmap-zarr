@@ -214,6 +214,18 @@ def _extract_t_start(group: zarr.Group) -> float | None:
         return None
 
 
+def _write_string_array(dst: zarr.Group, name: str, values: np.ndarray) -> None:
+    """Write a 1D string array using the Zarr v3 ``vlen-utf8`` dtype.
+
+    Why: passing a numpy ``<U*`` array to ``create_array`` lands on Zarr's
+    ``FixedLengthUTF32`` codec, which is an unratified V3 extension and
+    emits ``UnstableSpecificationWarning``.  Variable-length UTF-8 is the
+    stable spec type and what other tools expect.
+    """
+    arr = dst.create_array(name, shape=values.shape, dtype="str", overwrite=True)
+    arr[:] = [str(v) for v in values]
+
+
 def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
     """Copy channel_ids and properties/location arrays from source to destination.
 
@@ -226,7 +238,7 @@ def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
     """
     if "channel_ids" in list(src):
         ch_ids = np.asarray(src["channel_ids"][:])  # type: ignore[index]
-        dst.create_array("channel_ids", data=ch_ids, overwrite=True)
+        _write_string_array(dst, "channel_ids", ch_ids)
 
     if "properties" in list(src):
         try:
@@ -371,7 +383,7 @@ def _write_source_metadata_dict(
       caller into root attrs; not written here
     """
     ch_ids = np.asarray(metadata["channel_ids"])
-    dst.create_array("channel_ids", data=ch_ids, overwrite=True)
+    _write_string_array(dst, "channel_ids", ch_ids)
 
     loc = metadata.get("location")
     if loc is not None:

@@ -13,6 +13,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -608,6 +609,49 @@ class TraceViewer:
         self._scale_bar_label.y = (y_bottom + y_top) / 2
         self._scale_bar_label.text = self._format_scale_label(bar_value, units)
 
+    def _add_envelope_slot(self) -> None:
+        """Append a new envelope slot: ``varea`` plus min/max outline lines.
+
+        The outlines guarantee ≥1 px of ink per pixel-column even when the
+        min/max spread is too small for the fill to be visible at the
+        current zoom (e.g. fully-zoomed-out views).
+        """
+        i = len(self._envelope_glyphs)
+        g = self._fig.varea(
+            x="x", y1=f"y1_{i}", y2=f"y2_{i}",
+            source=self._envelope_source,
+            fill_alpha=0.7, color="black",
+        )
+        g.visible = False
+        self._envelope_glyphs.append(g)
+        for col, target in (
+            (f"y2_{i}", self._envelope_top_lines),
+            (f"y1_{i}", self._envelope_bottom_lines),
+        ):
+            line = self._fig.line(
+                x="x", y=col, source=self._envelope_source,
+                line_width=1.0, color="black",
+            )
+            line.visible = False
+            target.append(line)
+
+    def _add_line_slot(self) -> None:
+        """Append a new raw-mode line glyph slot."""
+        i = len(self._line_glyphs)
+        g = self._fig.line(
+            x="x", y=f"y_{i}",
+            source=self._line_source,
+            line_width=0.5, color="black",
+        )
+        g.visible = False
+        self._line_glyphs.append(g)
+
+    def _set_envelope_visible(self, i: int, visible: bool) -> None:
+        """Toggle visibility of the varea and its two outline lines together."""
+        self._envelope_glyphs[i].visible = visible
+        self._envelope_top_lines[i].visible = visible
+        self._envelope_bottom_lines[i].visible = visible
+
     def _build_figure(self) -> None:
         """Create the Bokeh figure with glyphs and sources."""
         t_start = self._samples_to_display(0)
@@ -650,17 +694,10 @@ class TraceViewer:
         self._envelope_source = ColumnDataSource(data=env_data)
 
         self._envelope_glyphs: list[Any] = []
-        for i in range(self._max_glyphs):
-            g = self._fig.varea(
-                x="x",
-                y1=f"y1_{i}",
-                y2=f"y2_{i}",
-                source=self._envelope_source,
-                fill_alpha=0.7,
-                color="black",
-            )
-            g.visible = False
-            self._envelope_glyphs.append(g)
+        self._envelope_top_lines: list[Any] = []
+        self._envelope_bottom_lines: list[Any] = []
+        for _ in range(self._max_glyphs):
+            self._add_envelope_slot()
 
         # Line source: columns x, y_0, y_1, ...
         line_data: dict[str, list[Any]] = {"x": []}
@@ -669,16 +706,8 @@ class TraceViewer:
         self._line_source = ColumnDataSource(data=line_data)
 
         self._line_glyphs: list[Any] = []
-        for i in range(self._max_glyphs):
-            g = self._fig.line(
-                x="x",
-                y=f"y_{i}",
-                source=self._line_source,
-                line_width=0.5,
-                color="black",
-            )
-            g.visible = False
-            self._line_glyphs.append(g)
+        for _ in range(self._max_glyphs):
+            self._add_line_slot()
 
         # Register range change callbacks
         self._fig.x_range.on_change("start", self._on_range_change)  # type: ignore[arg-type]
@@ -737,10 +766,15 @@ class TraceViewer:
 
         x_start = float(self._fig.x_range.start)  # type: ignore[arg-type]
         x_end = float(self._fig.x_range.end)  # type: ignore[arg-type]
-
-        # --- Handle y-range channel changes ---
         y_start = float(self._fig.y_range.start)  # type: ignore[arg-type]
         y_end = float(self._fig.y_range.end)  # type: ignore[arg-type]
+
+        # Rapid wheel-zoom can transiently leave a range at NaN/inf before
+        # Bokeh settles on valid endpoints.  Skip — the next range event
+        # will reschedule us with good values.
+        if not all(math.isfinite(v) for v in (x_start, x_end, y_start, y_end)):
+            log.debug("viewport_update: non-finite range, skipping")
+            return
 
         visible_mask = (self._all_offsets >= y_start) & (self._all_offsets <= y_end)
         visible_indices = np.where(visible_mask)[0]
@@ -772,31 +806,14 @@ class TraceViewer:
 
                 # Grow glyph pool if needed
                 if n_ch > self._max_glyphs:
-                    for i in range(self._max_glyphs, n_ch):
-                        g = self._fig.varea(
-                            x="x",
-                            y1=f"y1_{i}",
-                            y2=f"y2_{i}",
-                            source=self._envelope_source,
-                            fill_alpha=0.7,
-                            color="black",
-                        )
-                        g.visible = False
-                        self._envelope_glyphs.append(g)
-                        g = self._fig.line(
-                            x="x",
-                            y=f"y_{i}",
-                            source=self._line_source,
-                            line_width=0.5,
-                            color="black",
-                        )
-                        g.visible = False
-                        self._line_glyphs.append(g)
+                    for _ in range(self._max_glyphs, n_ch):
+                        self._add_envelope_slot()
+                        self._add_line_slot()
                     self._max_glyphs = n_ch
 
                 # Hide excess glyphs
                 for i in range(n_ch, self._max_glyphs):
-                    self._envelope_glyphs[i].visible = False
+                    self._set_envelope_visible(i, False)
                     self._line_glyphs[i].visible = False
 
         # Reposition scale bar to stay at bottom of viewport
@@ -907,7 +924,7 @@ class TraceViewer:
                 n_fetched = len(channels)
                 if self._last_was_raw is not (not use_envelope):
                     for i in range(self._max_glyphs):
-                        self._envelope_glyphs[i].visible = use_envelope and i < n_fetched
+                        self._set_envelope_visible(i, use_envelope and i < n_fetched)
                         self._line_glyphs[i].visible = (not use_envelope) and i < n_fetched
 
                 if use_envelope:
@@ -970,7 +987,7 @@ class TraceViewer:
         n_ch = len(channels)
         if self._last_was_raw is not (not use_envelope):
             for i in range(self._max_glyphs):
-                self._envelope_glyphs[i].visible = use_envelope and i < n_ch
+                self._set_envelope_visible(i, use_envelope and i < n_ch)
                 self._line_glyphs[i].visible = (not use_envelope) and i < n_ch
 
         if use_envelope:
@@ -1186,7 +1203,7 @@ class TraceViewer:
         n_ch = len(channels)
         if self._last_was_raw is not (not use_envelope):
             for i in range(self._max_glyphs):
-                self._envelope_glyphs[i].visible = use_envelope and i < n_ch
+                self._set_envelope_visible(i, use_envelope and i < n_ch)
                 self._line_glyphs[i].visible = (not use_envelope) and i < n_ch
         if use_envelope:
             self._envelope_source.data = display["data"]
@@ -1214,26 +1231,9 @@ class TraceViewer:
 
         # Grow glyph pool if needed (colors set by _update_glyph_colors below)
         if max_ch > self._max_glyphs:
-            for i in range(self._max_glyphs, max_ch):
-                g = self._fig.varea(
-                    x="x",
-                    y1=f"y1_{i}",
-                    y2=f"y2_{i}",
-                    source=self._envelope_source,
-                    fill_alpha=0.7,
-                    color="black",
-                )
-                g.visible = False
-                self._envelope_glyphs.append(g)
-                g = self._fig.line(
-                    x="x",
-                    y=f"y_{i}",
-                    source=self._line_source,
-                    line_width=0.5,
-                    color="black",
-                )
-                g.visible = False
-                self._line_glyphs.append(g)
+            for _ in range(self._max_glyphs, max_ch):
+                self._add_envelope_slot()
+                self._add_line_slot()
             self._max_glyphs = max_ch
         self._offsets = self._compute_channel_offsets()
         self._last_was_raw = None  # force visibility reset on next render
@@ -1254,7 +1254,7 @@ class TraceViewer:
 
         # Hide all glyphs — colors are updated in _apply atomically with data
         for i in range(self._max_glyphs):
-            self._envelope_glyphs[i].visible = False
+            self._set_envelope_visible(i, False)
             self._line_glyphs[i].visible = False
 
         # Re-render with current x viewport (non-blocking)
