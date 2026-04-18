@@ -256,6 +256,8 @@ class BuildSettings:
     """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
     prefetch_chunks: int = 0
     """Prefetch N source chunks in background threads (0=disabled, 2-3 for S3/WavPack)."""
+    wavpack_decode_threads: int = 4
+    """Threads for WavPack decode on --from-analyzer sources (1=single-threaded)."""
 
     def cli_cmd(self) -> None:
         """Run the build command."""
@@ -283,6 +285,7 @@ class BuildSettings:
                 keep_bad_channels=self.keep_bad_channels,
                 analyzer_storage_options={"anon": True} if self.input.startswith("s3://") else None,
                 raw_storage_options={"anon": True} if self.raw_path_override.startswith("s3://") else None,
+                wavpack_decode_threads=self.wavpack_decode_threads,
             )
             sampling_frequency = float(rec.get_sampling_frequency())
             full_samples = int(rec.get_num_samples())

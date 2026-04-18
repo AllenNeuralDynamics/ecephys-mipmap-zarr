@@ -277,6 +277,27 @@ class MipmapAttrs:
     source_metadata: dict[str, Any] | None = None
     t_start: float | None = None
 
+    def __post_init__(self) -> None:
+        """Coerce numpy scalars / dtype objects to plain Python types.
+
+        Why: callers frequently hand us numpy scalars (e.g. SpikeInterface's
+        ``get_sampling_frequency()`` returns ``np.float64``, ``rec.get_dtype()``
+        returns a ``np.dtype``).  Stored as-is they survive into
+        :meth:`to_dict` → ``zarr.Group.attrs`` where the JSON encoder may
+        warn or refuse.  Coercing at construction keeps the write path clean
+        and matches what :meth:`from_dict` already does on read.
+        """
+        object.__setattr__(self, "sampling_frequency", float(self.sampling_frequency))
+        object.__setattr__(self, "units", str(self.units))
+        object.__setattr__(self, "strides", [int(s) for s in self.strides])
+        object.__setattr__(self, "n_samples", int(self.n_samples))
+        object.__setattr__(self, "n_channels", int(self.n_channels))
+        object.__setattr__(self, "dtype", str(self.dtype))
+        if self.raw_source is not None:
+            object.__setattr__(self, "raw_source", str(self.raw_source))
+        if self.t_start is not None:
+            object.__setattr__(self, "t_start", float(self.t_start))
+
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict suitable for ``zarr.Group.attrs``.
 

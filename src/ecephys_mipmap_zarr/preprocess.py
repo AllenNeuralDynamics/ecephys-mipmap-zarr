@@ -52,6 +52,7 @@ def load_preprocessed_recording(
     keep_bad_channels: bool = False,
     analyzer_storage_options: dict[str, Any] | None = None,
     raw_storage_options: dict[str, Any] | None = None,
+    wavpack_decode_threads: int = 4,
 ) -> BaseRecording:
     """Reconstruct the preprocessed recording from a SortingAnalyzer zarr.
 
@@ -80,6 +81,11 @@ def load_preprocessed_recording(
         for public S3).
     raw_storage_options : dict or None, optional
         fsspec storage options for *raw_path*.
+    wavpack_decode_threads : int, optional
+        Number of threads the WavPack codec should use when decoding the
+        leaf zarr array.  Set to ``1`` for single-threaded decode.  Only
+        applied when the leaf codec exposes ``num_decoding_threads``
+        (``wavpack-numcodecs``); silently ignored otherwise.  Default 4.
 
     Returns
     -------
@@ -103,7 +109,51 @@ def load_preprocessed_recording(
     _fix_leaf(prov, raw_path, raw_storage_options)
     _clear_rel(prov)
     rec: BaseRecording = si.load(prov)
+    _configure_wavpack_decode_threads(rec, wavpack_decode_threads)
     return rec
+
+
+def _configure_wavpack_decode_threads(rec: Any, num_threads: int) -> None:
+    """Set ``num_decoding_threads`` on the leaf zarr's WavPack codec.
+
+    Walks ``_parent_recording`` / ``parent_recording`` down to the leaf
+    ``ZarrRecordingExtractor``, pulls its backing zarr array, and mutates
+    the codec instance in place.  Best-effort: logs and returns silently
+    if the chain, array, or codec doesn't look like WavPack.
+    """
+    if num_threads <= 0:
+        return
+    leaf: Any = rec
+    for _ in range(64):
+        parent = getattr(leaf, "_parent_recording", None) or getattr(leaf, "parent_recording", None)
+        if parent is None:
+            break
+        leaf = parent
+    else:
+        log.debug("wavpack-threads: recording chain deeper than 64, giving up")
+        return
+
+    root = getattr(leaf, "_root", None)
+    if root is None:
+        log.debug("wavpack-threads: leaf %s has no _root attribute", type(leaf).__name__)
+        return
+    try:
+        arr = root["traces_seg0"]
+    except (KeyError, TypeError):
+        log.debug("wavpack-threads: no traces_seg0 in leaf zarr root")
+        return
+    codec = getattr(arr, "compressor", None)
+    if codec is None or "wavpack" not in type(codec).__name__.lower():
+        log.debug("wavpack-threads: leaf codec is not WavPack (got %s)", type(codec).__name__)
+        return
+    if not hasattr(codec, "num_decoding_threads"):
+        log.info(
+            "wavpack-threads: %s has no num_decoding_threads attribute — upgrade wavpack-numcodecs?",
+            type(codec).__name__,
+        )
+        return
+    codec.num_decoding_threads = num_threads
+    log.info("wavpack-threads: set num_decoding_threads=%d on leaf codec", num_threads)
 
 
 def build_source_metadata(rec: BaseRecording) -> dict[str, Any]:

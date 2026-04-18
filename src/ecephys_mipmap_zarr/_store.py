@@ -244,7 +244,7 @@ def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
         try:
             props_src = src["properties"]
             if "location" in list(props_src):  # type: ignore[arg-type]
-                loc = np.asarray(props_src["location"][:])  # type: ignore[index]
+                loc = np.asarray(props_src["location"][:], dtype=np.float64)  # type: ignore[index]
                 props_dst = dst.require_group("properties")
                 props_dst.create_array("location", data=loc, overwrite=True)
         except (KeyError, AttributeError):
@@ -388,7 +388,7 @@ def _write_source_metadata_dict(
     loc = metadata.get("location")
     if loc is not None:
         props = dst.require_group("properties")
-        props.create_array("location", data=np.asarray(loc), overwrite=True)
+        props.create_array("location", data=np.asarray(loc, dtype=np.float64), overwrite=True)
 
     gain = metadata.get("gain_to_uV")
     offset = metadata.get("offset_to_uV")

@@ -243,6 +243,7 @@ class TestCLIParsing:
             "noise_floor": None,
             "clip_outliers": True,
             "prefetch_chunks": 0,
+            "wavpack_decode_threads": 4,
         }
 
     def test_build_accepts_no_clip_outliers_flag(self, monkeypatch: pytest.MonkeyPatch):
