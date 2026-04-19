@@ -367,24 +367,34 @@ class TestBuildMipmap:
     def test_prefetch_propagates_contextvars(self):
         """_chunk_iter copies the caller's context into prefetch workers.
 
-        Regression: without ``contextvars.copy_context()`` on submit, values
-        set via ``scipy.fft.set_workers`` (or any ContextVar) don't reach the
-        prefetch threads, silently losing the intended parallelism.
+        Regression: (a) without ``contextvars.copy_context()`` on submit,
+        values set via ``scipy.fft.set_workers`` (or any ContextVar) don't
+        reach the prefetch threads, silently losing the intended parallelism.
+        (b) Reusing a single Context across ≥2 concurrent workers raises
+        ``RuntimeError`` — so we must copy per submit, not once up front.
         """
         import contextvars
+        import threading
+        import time
 
         from ecephys_mipmap_zarr._engine import _chunk_iter
 
         sentinel: contextvars.ContextVar[str] = contextvars.ContextVar("test_sentinel", default="unset")
         seen: list[str] = []
+        seen_lock = threading.Lock()
 
         def read_fn(t0: int, t1: int) -> np.ndarray:
-            seen.append(sentinel.get())
+            # Hold inside the context for long enough that ≥2 workers overlap —
+            # if we reused a single Context object, the second concurrent
+            # Context.run would raise RuntimeError here.
+            time.sleep(0.01)
+            with seen_lock:
+                seen.append(sentinel.get())
             return np.zeros((1, t1 - t0), dtype=np.int16)
 
         token = sentinel.set("propagated")
         try:
-            list(_chunk_iter(read_fn, n_samples=1000, shard_samples=250, prefetch_chunks=2))
+            list(_chunk_iter(read_fn, n_samples=1000, shard_samples=250, prefetch_chunks=3))
         finally:
             sentinel.reset(token)
 

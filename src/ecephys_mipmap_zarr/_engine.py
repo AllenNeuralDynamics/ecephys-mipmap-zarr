@@ -462,12 +462,16 @@ def _chunk_iter(
     from collections import deque
     from concurrent.futures import Future, ThreadPoolExecutor
 
-    # Snapshot the caller's context (scipy.fft.set_workers, etc.) so the
-    # setting reaches the prefetch threads.  ThreadPoolExecutor.submit
-    # does NOT propagate contextvars by default — new threads start with
-    # an empty context, which is how users hit "I set workers=-1 but the
-    # FFTs are still single-threaded".
-    ctx = contextvars.copy_context()
+    # Propagate the caller's context (scipy.fft.set_workers, etc.) into
+    # each prefetch worker.  ThreadPoolExecutor.submit doesn't propagate
+    # contextvars by default — new threads start with an empty context,
+    # which silently drops the caller's ``scipy.fft.set_workers(-1)``.
+    # NOTE: we copy *per submit* because ``Context.run`` raises RuntimeError
+    # if the same Context object is active on two threads concurrently,
+    # which happens whenever prefetch_chunks >= 2.
+    def _submit_in_context(t0: int, t1: int) -> Future[npt.NDArray[Any]]:
+        ctx = contextvars.copy_context()
+        return pool.submit(ctx.run, read_fn, t0, t1)
 
     with ThreadPoolExecutor(max_workers=prefetch_chunks) as pool:
         pending: deque[tuple[int, int, Future[npt.NDArray[Any]]]] = deque()
@@ -475,7 +479,7 @@ def _chunk_iter(
 
         while idx < len(boundaries) and len(pending) < prefetch_chunks:
             t0, t1 = boundaries[idx]
-            pending.append((t0, t1, pool.submit(ctx.run, read_fn, t0, t1)))
+            pending.append((t0, t1, _submit_in_context(t0, t1)))
             idx += 1
 
         while pending:
@@ -483,7 +487,7 @@ def _chunk_iter(
             yield t0, t1, future.result()
             if idx < len(boundaries):
                 t0_next, t1_next = boundaries[idx]
-                pending.append((t0_next, t1_next, pool.submit(ctx.run, read_fn, t0_next, t1_next)))
+                pending.append((t0_next, t1_next, _submit_in_context(t0_next, t1_next)))
                 idx += 1
 
 
