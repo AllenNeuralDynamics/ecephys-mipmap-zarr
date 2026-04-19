@@ -364,6 +364,32 @@ class TestBuildMipmap:
         np.testing.assert_array_equal(np.asarray(root_seq["raw"][:]), np.asarray(root_pre["raw"][:]))
         np.testing.assert_array_equal(np.asarray(root_seq["minmax/s32"][:]), np.asarray(root_pre["minmax/s32"][:]))
 
+    def test_prefetch_propagates_contextvars(self):
+        """_chunk_iter copies the caller's context into prefetch workers.
+
+        Regression: without ``contextvars.copy_context()`` on submit, values
+        set via ``scipy.fft.set_workers`` (or any ContextVar) don't reach the
+        prefetch threads, silently losing the intended parallelism.
+        """
+        import contextvars
+
+        from ecephys_mipmap_zarr._engine import _chunk_iter
+
+        sentinel: contextvars.ContextVar[str] = contextvars.ContextVar("test_sentinel", default="unset")
+        seen: list[str] = []
+
+        def read_fn(t0: int, t1: int) -> np.ndarray:
+            seen.append(sentinel.get())
+            return np.zeros((1, t1 - t0), dtype=np.int16)
+
+        token = sentinel.set("propagated")
+        try:
+            list(_chunk_iter(read_fn, n_samples=1000, shard_samples=250, prefetch_chunks=2))
+        finally:
+            sentinel.reset(token)
+
+        assert seen == ["propagated"] * 4
+
 
 # ---------------------------------------------------------------------------
 # add_pyramid integration tests

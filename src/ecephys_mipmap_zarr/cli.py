@@ -75,6 +75,28 @@ def _resolve_prefetch_chunks(value: int, source_path: str) -> int:
     return 3 if "://" in source_path else 0
 
 
+@contextmanager
+def _scipy_fft_workers(n: int) -> Generator[None, None, None]:
+    """Scope ``scipy.fft.set_workers(n)`` around a build.
+
+    ``n == 0`` leaves the scipy default alone (no-op).  Any other value
+    is passed through to ``scipy.fft.set_workers`` — ``-1`` means "all
+    available cores", which is the right choice for bulk `--from-analyzer`
+    builds dominated by PhaseShift FFTs.
+
+    The setting rides a :class:`contextvars.ContextVar`; `_chunk_iter`
+    copies the context when submitting to its prefetch pool so the value
+    actually reaches the worker threads.
+    """
+    if n == 0:
+        yield
+        return
+    from scipy.fft import set_workers
+
+    with set_workers(n):
+        yield
+
+
 def _resolve_window(
     start_seconds: float,
     duration_seconds: float | None,
@@ -271,6 +293,8 @@ class BuildSettings:
     """Prefetch N source chunks in background threads (-1=auto: 3 remote / 0 local; 0=disabled)."""
     wavpack_decode_threads: int = 4
     """Threads for WavPack decode on --from-analyzer sources (1=single-threaded)."""
+    fft_workers: int = -1
+    """scipy.fft workers for PhaseShift FFTs (-1=all cores, 1=single, 0=leave scipy default)."""
 
     def cli_cmd(self) -> None:
         """Run the build command."""
@@ -400,7 +424,7 @@ class BuildSettings:
             quantize=self.quantize,
             quantize_pyramids=self.quantize_pyramids,
         )
-        with _progress_bar() as progress_fn:
+        with _progress_bar() as progress_fn, _scipy_fft_workers(self.fft_workers):
             build_mipmap(
                 source,
                 self.output,
