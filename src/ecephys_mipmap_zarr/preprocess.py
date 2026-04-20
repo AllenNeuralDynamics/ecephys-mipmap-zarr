@@ -53,6 +53,7 @@ def load_preprocessed_recording(
     analyzer_storage_options: dict[str, Any] | None = None,
     raw_storage_options: dict[str, Any] | None = None,
     wavpack_decode_threads: int = 4,
+    fast_phase_shift: bool = True,
 ) -> BaseRecording:
     """Reconstruct the preprocessed recording from a SortingAnalyzer zarr.
 
@@ -86,6 +87,14 @@ def load_preprocessed_recording(
         leaf zarr array.  Set to ``1`` for single-threaded decode.  Only
         applied when the leaf codec exposes ``num_decoding_threads``
         (``wavpack-numcodecs``); silently ignored otherwise.  Default 4.
+    fast_phase_shift : bool, optional
+        When True (default), monkey-patch SI's
+        ``apply_frequency_shift`` with a 32-tap numba sinc FIR
+        (``_fast_phase_shift.install()``).  On NP 1M-sample shards this
+        is ~85× faster than the baseline FFT with ~0.19% spike-band
+        error — see :mod:`ecephys_mipmap_zarr._fast_phase_shift` for
+        benchmark and correctness details.  Set False to keep SI's
+        original FFT implementation.
 
     Returns
     -------
@@ -99,6 +108,11 @@ def load_preprocessed_recording(
     except ImportError as e:
         msg = "spikeinterface is required for analyzer-based builds: pip install ecephys-mipmap-zarr[si]"
         raise ImportError(msg) from e
+
+    if fast_phase_shift:
+        from ecephys_mipmap_zarr._fast_phase_shift import install as _install_fast_phase_shift
+
+        _install_fast_phase_shift()
 
     prov = _read_analyzer_recording_dict(analyzer_path, analyzer_storage_options)
     prov = copy.deepcopy(prov)
