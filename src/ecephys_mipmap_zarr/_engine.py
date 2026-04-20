@@ -431,6 +431,56 @@ ProgressCallback = Callable[[int, int], None]
 """Type for progress callbacks: ``(samples_processed, total_samples)``."""
 
 
+def _retry_on_oserror(
+    read_fn: Callable[[int, int], npt.NDArray[Any]],
+    retries: int,
+) -> Callable[[int, int], npt.NDArray[Any]]:
+    """Wrap *read_fn* to retry on :class:`OSError` with exponential backoff.
+
+    Intended for reading from remote-backed sources (FUSE-mounted S3,
+    fsspec, etc.) where transient EIO / ETIMEDOUT errors happen under
+    network/rate-limit pressure.  Reads are idempotent (same ``[t0, t1)``
+    range returns the same data), so retrying a failed chunk is safe.
+
+    Parameters
+    ----------
+    read_fn : callable
+        The original ``(t0, t1) -> np.ndarray`` reader.
+    retries : int
+        Maximum number of additional attempts after the first failure.
+        ``0`` returns *read_fn* unchanged.  Backoff is ``2**attempt``
+        seconds (1, 2, 4, 8, ...).
+    """
+    if retries <= 0:
+        return read_fn
+
+    import time
+
+    def _wrapped(t0: int, t1: int) -> npt.NDArray[Any]:
+        attempt = 0
+        while True:
+            try:
+                return read_fn(t0, t1)
+            except OSError as exc:
+                if attempt >= retries:
+                    raise
+                delay = 2**attempt
+                log.warning(
+                    "source read [%d, %d) failed (%s: %s), retry %d/%d in %ds",
+                    t0,
+                    t1,
+                    type(exc).__name__,
+                    exc,
+                    attempt + 1,
+                    retries,
+                    delay,
+                )
+                time.sleep(delay)
+                attempt += 1
+
+    return _wrapped
+
+
 def _chunk_iter(
     read_fn: Callable[[int, int], npt.NDArray[Any]],
     n_samples: int,
@@ -505,6 +555,7 @@ def _write_raw_and_compute_finest(
     lsb_shift_raw: int = 0,
     lsb_shift_pyramid: int = 0,
     prefetch_chunks: int = 0,
+    source_retries: int = 0,
 ) -> list[npt.NDArray[Any]] | _ShiftStats:
     """Write raw data and simultaneously compute the finest pyramid level.
 
@@ -566,7 +617,9 @@ def _write_raw_and_compute_finest(
     def _read_source(t0: int, t1: int) -> npt.NDArray[Any]:
         return np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)  # (T,C) → (C,T)
 
-    for t0, t1, chunk in _chunk_iter(_read_source, n_samples, shard_samples, prefetch_chunks):
+    read_fn = _retry_on_oserror(_read_source, source_retries)
+
+    for t0, t1, chunk in _chunk_iter(read_fn, n_samples, shard_samples, prefetch_chunks):
         # Compute finest min/max from ORIGINAL (unshifted) data
         mm = _compute_minmax_block(chunk, base_stride)
 
@@ -632,6 +685,7 @@ def _build_finest_from_raw(
     stats: _AccumulatedStats | None = None,
     progress: ProgressCallback | None = None,
     prefetch_chunks: int = 0,
+    source_retries: int = 0,
 ) -> list[npt.NDArray[Any]]:
     """Build the finest pyramid level by reading an existing raw array.
 
@@ -672,7 +726,9 @@ def _build_finest_from_raw(
             return np.ascontiguousarray(np.asarray(raw_array[t0:t1, :]).T)
         return np.asarray(raw_array[:, t0:t1])
 
-    for t0, t1, chunk in _chunk_iter(_read_raw, n_samples, shard_samples, prefetch_chunks):
+    read_fn = _retry_on_oserror(_read_raw, source_retries)
+
+    for t0, t1, chunk in _chunk_iter(read_fn, n_samples, shard_samples, prefetch_chunks):
         mm = _compute_minmax_block(chunk, base_stride)
 
         if finest_array is not None:
@@ -857,6 +913,7 @@ def _build_non_quantized(
     progress: ProgressCallback | None,
     clip_outliers: bool = True,
     prefetch_chunks: int = 0,
+    source_retries: int = 0,
 ) -> tuple[int, int]:
     """Build raw + pyramid arrays with optional LSB shift.
 
@@ -919,6 +976,7 @@ def _build_non_quantized(
         lsb_shift_raw=raw_shift,
         lsb_shift_pyramid=pyr_shift,
         prefetch_chunks=prefetch_chunks,
+        source_retries=source_retries,
     )
 
     _build_cascade_levels(

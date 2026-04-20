@@ -234,6 +234,7 @@ def build_mipmap(
             stats=stats,
             progress=progress,
             prefetch_chunks=config.prefetch_chunks,
+            source_retries=config.source_retries,
         )
 
         if do_quantize_pyramids:
@@ -363,6 +364,7 @@ def build_mipmap(
             progress=progress,
             clip_outliers=config.clip_outliers,
             prefetch_chunks=config.prefetch_chunks,
+            source_retries=config.source_retries,
         )
 
     # Copy source metadata if requested
@@ -528,6 +530,7 @@ def add_pyramid(
             stats=stats,
             progress=progress,
             prefetch_chunks=config.prefetch_chunks,
+            source_retries=config.source_retries,
         )
 
         # Compute level quantization from accumulated stats
@@ -639,6 +642,7 @@ def add_pyramid(
                 n_samples=n_samples,
                 progress=progress,
                 prefetch_chunks=config.prefetch_chunks,
+                source_retries=config.source_retries,
             )
             all_s32 = np.concatenate(s32_blocks, axis=2)
             shifted_s32 = ((all_s32 + (1 << (pyr_shift - 1))) >> pyr_shift).astype(np.int16)
@@ -738,6 +742,7 @@ def add_pyramid(
                 n_samples=n_samples,
                 progress=progress,
                 prefetch_chunks=config.prefetch_chunks,
+                source_retries=config.source_retries,
             )
 
             _build_cascade_levels(

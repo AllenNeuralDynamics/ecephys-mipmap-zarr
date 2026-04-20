@@ -364,6 +364,47 @@ class TestBuildMipmap:
         np.testing.assert_array_equal(np.asarray(root_seq["raw"][:]), np.asarray(root_pre["raw"][:]))
         np.testing.assert_array_equal(np.asarray(root_seq["minmax/s32"][:]), np.asarray(root_pre["minmax/s32"][:]))
 
+    def test_source_retries_recover_from_oserror(self, monkeypatch):
+        """_retry_on_oserror retries a failing read and succeeds on a later attempt."""
+        import time as _time
+
+        from ecephys_mipmap_zarr import _engine
+
+        monkeypatch.setattr(_time, "sleep", lambda s: None)  # skip backoff waits
+
+        attempts = {"n": 0}
+
+        def flaky_read(t0: int, t1: int) -> np.ndarray:
+            attempts["n"] += 1
+            if attempts["n"] <= 2:  # fail twice, succeed on 3rd
+                raise OSError(5, "Input/output error")
+            return np.zeros((1, t1 - t0), dtype=np.int16)
+
+        wrapped = _engine._retry_on_oserror(flaky_read, retries=3)
+        out = wrapped(0, 100)
+
+        assert out.shape == (1, 100)
+        assert attempts["n"] == 3
+
+    def test_source_retries_reraise_after_exhaustion(self, monkeypatch):
+        """When all retries fail, the last exception propagates."""
+        import time as _time
+
+        from ecephys_mipmap_zarr import _engine
+
+        monkeypatch.setattr(_time, "sleep", lambda s: None)
+
+        def always_fails(t0: int, t1: int) -> np.ndarray:
+            raise OSError(5, "Input/output error")
+
+        wrapped = _engine._retry_on_oserror(always_fails, retries=2)
+        try:
+            wrapped(0, 100)
+        except OSError as exc:
+            assert exc.errno == 5
+        else:
+            raise AssertionError("expected OSError")
+
     def test_prefetch_propagates_contextvars(self):
         """_chunk_iter copies the caller's context into prefetch workers.
 

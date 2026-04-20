@@ -181,6 +181,13 @@ class BuildConfig:
         Number of source chunks to prefetch in background threads.
         ``0`` (default) disables prefetch. Set to 2-3 for S3 or WavPack
         sources where read latency is high.
+    source_retries : int
+        Number of times to retry a source chunk read on ``OSError`` with
+        exponential backoff (1s, 2s, 4s, ...).  Remote-backed sources
+        (FUSE-mounted S3, fsspec) emit transient EIO errors under
+        network/rate-limit pressure; retries turn those into logged
+        warnings instead of a dead build.  Default 5.  Set to 0 to
+        disable (tests, debugging).
     """
 
     chunk_config: ChunkConfig = DEFAULT_CHUNK_CONFIG
@@ -194,6 +201,7 @@ class BuildConfig:
     noise_floor: float | None = None
     clip_outliers: bool = True
     prefetch_chunks: int = 0
+    source_retries: int = 5
 
 
 DEFAULT_BUILD_CONFIG: BuildConfig = BuildConfig()
