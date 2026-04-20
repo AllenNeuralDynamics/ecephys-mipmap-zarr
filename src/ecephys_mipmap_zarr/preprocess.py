@@ -54,6 +54,8 @@ def load_preprocessed_recording(
     raw_storage_options: dict[str, Any] | None = None,
     wavpack_decode_threads: int = 4,
     fast_phase_shift: bool = True,
+    fast_filter: bool = True,
+    fast_cmr: bool = True,
 ) -> BaseRecording:
     """Reconstruct the preprocessed recording from a SortingAnalyzer zarr.
 
@@ -113,6 +115,16 @@ def load_preprocessed_recording(
         from ecephys_mipmap_zarr._fast_phase_shift import install as _install_fast_phase_shift
 
         _install_fast_phase_shift()
+
+    if fast_filter:
+        from ecephys_mipmap_zarr._fast_filter import install as _install_fast_filter
+
+        _install_fast_filter()
+
+    if fast_cmr:
+        from ecephys_mipmap_zarr._fast_cmr import install as _install_fast_cmr
+
+        _install_fast_cmr()
 
     prov = _read_analyzer_recording_dict(analyzer_path, analyzer_storage_options)
     prov = copy.deepcopy(prov)
