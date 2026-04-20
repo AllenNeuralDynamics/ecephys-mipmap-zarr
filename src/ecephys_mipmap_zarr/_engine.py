@@ -7,6 +7,7 @@ build API.  Not part of the public API.
 
 from __future__ import annotations
 
+import errno
 import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
@@ -431,16 +432,40 @@ ProgressCallback = Callable[[int, int], None]
 """Type for progress callbacks: ``(samples_processed, total_samples)``."""
 
 
+_TRANSIENT_ERRNOS: frozenset[int] = frozenset(
+    {
+        errno.EIO,  # 5 — I/O error (FUSE, network-backed filesystem)
+        errno.EAGAIN,  # 11 — resource temporarily unavailable / EWOULDBLOCK
+        errno.EBUSY,  # 16 — device or resource busy
+        errno.ENETDOWN,  # 100 — network is down
+        errno.ENETUNREACH,  # 101 — network unreachable
+        errno.ECONNRESET,  # 104 — connection reset by peer
+        errno.ETIMEDOUT,  # 110 — connection timed out
+        errno.EHOSTUNREACH,  # 113 — no route to host
+    }
+)
+"""OSError ``errno`` values that indicate a transient (retryable) failure.
+
+Permanent errors (``ENOENT``, ``EACCES``, ``EINVAL``, etc.) are deliberately
+excluded so a config typo fails immediately rather than burning up to 31 s of
+exponential-backoff sleep before surfacing.
+"""
+
+
 def _retry_on_oserror(
     read_fn: Callable[[int, int], npt.NDArray[Any]],
     retries: int,
 ) -> Callable[[int, int], npt.NDArray[Any]]:
-    """Wrap *read_fn* to retry on :class:`OSError` with exponential backoff.
+    """Wrap *read_fn* to retry *transient* :class:`OSError` with exponential backoff.
 
     Intended for reading from remote-backed sources (FUSE-mounted S3,
-    fsspec, etc.) where transient EIO / ETIMEDOUT errors happen under
-    network/rate-limit pressure.  Reads are idempotent (same ``[t0, t1)``
-    range returns the same data), so retrying a failed chunk is safe.
+    fsspec, etc.) where EIO / ETIMEDOUT spikes happen under network or
+    rate-limit pressure.  Reads are idempotent (same ``[t0, t1)`` range
+    returns the same data), so retrying a failed chunk is safe.
+
+    Only errors whose ``errno`` is in :data:`_TRANSIENT_ERRNOS` are retried.
+    Permanent errors (missing file, permission denied, bad argument) raise
+    immediately so they fail fast instead of hiding behind 31 s of sleep.
 
     Parameters
     ----------
@@ -462,15 +487,18 @@ def _retry_on_oserror(
             try:
                 return read_fn(t0, t1)
             except OSError as exc:
-                if attempt >= retries:
+                # Only retry transient errors; permanent errors (typos,
+                # missing files, bad permissions) should fail immediately.
+                if exc.errno not in _TRANSIENT_ERRNOS or attempt >= retries:
                     raise
                 delay = 2**attempt
                 log.warning(
-                    "source read [%d, %d) failed (%s: %s), retry %d/%d in %ds",
+                    "source read [%d, %d) failed (%s: %s, errno=%d), retry %d/%d in %ds",
                     t0,
                     t1,
                     type(exc).__name__,
                     exc,
+                    exc.errno if exc.errno is not None else -1,
                     attempt + 1,
                     retries,
                     delay,

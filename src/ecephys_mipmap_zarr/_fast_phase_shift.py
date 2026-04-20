@@ -344,6 +344,13 @@ def install() -> None:
 
     if getattr(ps.apply_frequency_shift, "_fast_patched", False):
         return
+    if not _HAS_NUMBA:
+        raise RuntimeError(
+            "fast-phase-shift requires numba, but it failed to import at module "
+            "load time.  Install it (`pip install numba>=0.59`) or call "
+            "load_preprocessed_recording(..., fast_phase_shift=False) to fall "
+            "back to SI's stock FFT PhaseShift."
+        )
     _original_functions["apply_frequency_shift"] = ps.apply_frequency_shift
     _original_functions["apply_fshift"] = ps.apply_fshift
     _original_functions["PhaseShiftRecording.__init__"] = ps.PhaseShiftRecording.__init__
