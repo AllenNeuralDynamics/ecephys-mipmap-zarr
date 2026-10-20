@@ -315,8 +315,24 @@ def _fast_get_traces(self: Any, start_frame: int, end_frame: int, channel_indice
     return shifted[half : half + (end_frame - start_frame), :]
 
 
+def si_has_fir_phase_shift() -> bool:
+    """Return True when SI's ``PhaseShiftRecording`` has its own FIR path (``method="fir"``)."""
+    import inspect
+    import sys
+
+    import spikeinterface.preprocessing.phase_shift  # noqa: F401 — ensure module is loaded
+
+    ps = sys.modules["spikeinterface.preprocessing.phase_shift"]
+    return "method" in inspect.signature(ps.PhaseShiftRecording.__init__).parameters
+
+
 def install() -> None:
     """Monkey-patch SI's ``apply_frequency_shift`` and ``PhaseShiftRecording.__init__``.
+
+    No-op when SI has its own FIR path (:func:`si_has_fir_phase_shift`): the patched
+    ``__init__`` doesn't accept SI's ``method``/``n_taps`` kwargs, so the two can't coexist.
+    Select SI's path through the recording kwargs instead (see
+    :func:`ecephys_mipmap_zarr.preprocess.load_preprocessed_recording`).
 
     Two patches:
 
@@ -343,6 +359,9 @@ def install() -> None:
     ps = sys.modules["spikeinterface.preprocessing.phase_shift"]
 
     if getattr(ps.apply_frequency_shift, "_fast_patched", False):
+        return
+    if si_has_fir_phase_shift():
+        log.info("fast-phase-shift: SpikeInterface has method='fir'; not patching")
         return
     if not _HAS_NUMBA:
         raise RuntimeError(

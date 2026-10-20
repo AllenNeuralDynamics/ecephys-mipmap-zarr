@@ -25,6 +25,12 @@ import scipy.signal
 from ecephys_mipmap_zarr import _fast_phase_shift
 
 
+@pytest.fixture(autouse=True)
+def _patch_regardless_of_si_version(monkeypatch):
+    """Exercise the patch even on an SI that has its own FIR phase shift."""
+    monkeypatch.setattr(_fast_phase_shift, "si_has_fir_phase_shift", lambda: False)
+
+
 FS = 30_000.0
 SPIKE_LO = 300.0
 SPIKE_HI = 5_000.0
@@ -154,6 +160,22 @@ class TestInstallUninstall:
         assert ps.apply_frequency_shift is _fast_phase_shift.apply_frequency_shift_fir
         _fast_phase_shift.uninstall()
         assert ps.apply_frequency_shift is original
+
+    def test_install_is_noop_when_si_has_fir(self, monkeypatch):
+        pytest.importorskip("spikeinterface")
+        import sys
+
+        import spikeinterface.preprocessing.phase_shift  # noqa: F401
+
+        ps = sys.modules["spikeinterface.preprocessing.phase_shift"]
+        _fast_phase_shift.uninstall()
+        original_init = ps.PhaseShiftRecording.__init__
+        original_shift = ps.apply_frequency_shift
+        monkeypatch.setattr(_fast_phase_shift, "si_has_fir_phase_shift", lambda: True)
+        _fast_phase_shift.install()
+        assert ps.PhaseShiftRecording.__init__ is original_init
+        assert ps.apply_frequency_shift is original_shift
+        _fast_phase_shift.uninstall()
 
     def test_axis_non_zero_raises(self):
         signal = np.zeros((100, 4), dtype=np.float32)

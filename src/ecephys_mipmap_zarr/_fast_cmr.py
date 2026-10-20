@@ -127,11 +127,19 @@ def _fast_cmr_get_traces(self: Any, start_frame: int, end_frame: int, channel_in
     return re_referenced.astype(self.dtype, copy=False)
 
 
+def si_has_row_median() -> bool:
+    """Return True when SI's common reference has its own fast exact median (``_row_median``)."""
+    import importlib.util
+
+    return importlib.util.find_spec("spikeinterface.preprocessing._row_median") is not None
+
+
 def install() -> None:
     """Monkey-patch ``CommonReferenceRecordingSegment.get_traces`` for parallel median/mean.
 
     Idempotent.  Only affects the global-reference, no-groups path — the
-    common NP configuration.
+    common NP configuration.  No-op when SI has its own fast median
+    (:func:`si_has_row_median`), so the two never stack.
     """
     global _original_get_traces
     import sys
@@ -141,6 +149,9 @@ def install() -> None:
     cr = sys.modules["spikeinterface.preprocessing.common_reference"]
 
     if getattr(cr.CommonReferenceRecordingSegment.get_traces, "_fast_patched", False):
+        return
+    if si_has_row_median():
+        log.info("fast-cmr: SpikeInterface has its own row median; not patching")
         return
     _original_get_traces = cr.CommonReferenceRecordingSegment.get_traces
     _fast_cmr_get_traces._fast_patched = True  # type: ignore[attr-defined]

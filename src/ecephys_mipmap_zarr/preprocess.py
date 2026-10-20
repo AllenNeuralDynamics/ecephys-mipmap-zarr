@@ -96,7 +96,9 @@ def load_preprocessed_recording(
         is ~85× faster than the baseline FFT with ~0.19% spike-band
         error — see :mod:`ecephys_mipmap_zarr._fast_phase_shift` for
         benchmark and correctness details.  Set False to keep SI's
-        original FFT implementation.
+        original FFT implementation.  When SI's ``PhaseShiftRecording`` has
+        its own ``method="fir"``, that is selected through the provenance
+        kwargs instead of patching.
 
     Returns
     -------
@@ -114,9 +116,12 @@ def load_preprocessed_recording(
         )
         raise ImportError(msg) from e
 
+    use_si_fir_phase_shift = False
     if fast_phase_shift:
         from ecephys_mipmap_zarr._fast_phase_shift import install as _install_fast_phase_shift
+        from ecephys_mipmap_zarr._fast_phase_shift import si_has_fir_phase_shift
 
+        use_si_fir_phase_shift = si_has_fir_phase_shift()
         _install_fast_phase_shift()
 
     if fast_filter:
@@ -137,6 +142,8 @@ def load_preprocessed_recording(
 
     _fix_leaf(prov, raw_path, raw_storage_options)
     _clear_rel(prov)
+    if use_si_fir_phase_shift:
+        _select_fir_phase_shift(prov)
     rec: BaseRecording = si.load(prov)
     _configure_wavpack_decode_threads(rec, wavpack_decode_threads)
     return rec
@@ -415,3 +422,22 @@ def _clear_rel(d: dict[str, Any]) -> None:
         child = d.get("kwargs", {}).get(key)
         if isinstance(child, dict) and "class" in child:
             _clear_rel(child)
+
+def _select_fir_phase_shift(d: dict[str, Any]) -> None:
+    """Switch every ``PhaseShiftRecording`` in the chain to SI's FIR method.
+
+    Matches the monkey-patch: 32 taps, and float32 output when the node leaves
+    ``dtype`` unset, so an int16 parent isn't rounded back to int16 before filtering.
+    """
+    from ecephys_mipmap_zarr._fast_phase_shift import _DEFAULT_N_TAPS
+
+    if d.get("class", "").endswith("PhaseShiftRecording"):
+        kwargs = d.setdefault("kwargs", {})
+        kwargs["method"] = "fir"
+        kwargs["n_taps"] = _DEFAULT_N_TAPS
+        if kwargs.get("dtype") is None:
+            kwargs["dtype"] = "float32"
+    for key in ("recording", "parent_recording"):
+        child = d.get("kwargs", {}).get(key)
+        if isinstance(child, dict) and "class" in child:
+            _select_fir_phase_shift(child)

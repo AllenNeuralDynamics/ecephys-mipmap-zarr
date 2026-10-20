@@ -19,6 +19,7 @@ from ecephys_mipmap_zarr.preprocess import (
     SIRecordingSource,
     _clear_rel,
     _fix_leaf,
+    _select_fir_phase_shift,
     _unwrap_outer_channelslice,
 )
 
@@ -170,3 +171,34 @@ class TestUnwrapOuterChannelslice:
         }
         result = _unwrap_outer_channelslice(prov)
         assert result is inner
+
+
+class TestSelectFirPhaseShift:
+    @staticmethod
+    def _chain(phase_shift_kwargs):
+        leaf = {"class": "spikeinterface.core.zarrextractors.ZarrRecordingExtractor", "kwargs": {}}
+        ps = {
+            "class": "spikeinterface.preprocessing.phase_shift.PhaseShiftRecording",
+            "kwargs": {"recording": leaf, **phase_shift_kwargs},
+        }
+        hp = {
+            "class": "spikeinterface.preprocessing.filter.HighpassFilterRecording",
+            "kwargs": {"recording": ps, "dtype": "<i2"},
+        }
+        return hp, ps, leaf
+
+    def test_selects_fir_with_float32_output_when_dtype_unset(self):
+        hp, ps, leaf = self._chain({"margin_ms": 100.0})
+        _select_fir_phase_shift(hp)
+        assert ps["kwargs"]["method"] == "fir"
+        assert ps["kwargs"]["n_taps"] == 32
+        assert ps["kwargs"]["dtype"] == "float32"
+        assert ps["kwargs"]["margin_ms"] == 100.0
+        assert hp["kwargs"] == {"recording": ps, "dtype": "<i2"}
+        assert leaf["kwargs"] == {}
+
+    def test_keeps_pinned_dtype(self):
+        hp, ps, _ = self._chain({"dtype": "<i2"})
+        _select_fir_phase_shift(hp)
+        assert ps["kwargs"]["method"] == "fir"
+        assert ps["kwargs"]["dtype"] == "<i2"

@@ -8,6 +8,12 @@ import pytest
 from ecephys_mipmap_zarr import _fast_cmr
 
 
+@pytest.fixture(autouse=True)
+def _patch_regardless_of_si_version(monkeypatch):
+    """Exercise the patch even on an SI that has its own row median."""
+    monkeypatch.setattr(_fast_cmr, "si_has_row_median", lambda: False)
+
+
 class TestParallelReduceMatchesNumpy:
     def test_median_axis1_matches_stock(self):
         rng = np.random.default_rng(0)
@@ -55,6 +61,21 @@ class TestInstallUninstall:
         original = cr.CommonReferenceRecordingSegment.get_traces
         _fast_cmr.install()
         assert cr.CommonReferenceRecordingSegment.get_traces is _fast_cmr._fast_cmr_get_traces
+        _fast_cmr.uninstall()
+        assert cr.CommonReferenceRecordingSegment.get_traces is original
+
+    def test_install_is_noop_when_si_has_row_median(self, monkeypatch):
+        pytest.importorskip("spikeinterface")
+        import sys
+
+        import spikeinterface.preprocessing.common_reference  # noqa: F401
+
+        cr = sys.modules["spikeinterface.preprocessing.common_reference"]
+        _fast_cmr.uninstall()
+        original = cr.CommonReferenceRecordingSegment.get_traces
+        monkeypatch.setattr(_fast_cmr, "si_has_row_median", lambda: True)
+        _fast_cmr.install()
+        assert cr.CommonReferenceRecordingSegment.get_traces is original
         _fast_cmr.uninstall()
         assert cr.CommonReferenceRecordingSegment.get_traces is original
 
