@@ -28,7 +28,8 @@ cbin = ["mtscomp"]
 s3 = ["s3fs"]
 wavpack = ["wavpack-numcodecs"]
 si = [
-    "spikeinterface @ git+https://github.com/alejoe91/spikeinterface@zarrv3",
+    # SI allows zarr 3 only on Python >= 3.14; below that it pins zarr < 3, which conflicts with ours.
+    "spikeinterface>=0.105.1; python_version >= '3.14'",
     "scipy>=1.10",
     "wavpack-numcodecs",
     "numba>=0.59",
@@ -60,6 +61,9 @@ dev = [
     "s3fs",
     "wavpack-numcodecs",
     "matplotlib>=3.10.8",
+    "spikeinterface>=0.105.1; python_version >= '3.14'",
+    "scipy>=1.10",
+    "numba>=0.59",
 ]
 jupyter = [{ include-group = "dev" }, "ipykernel", "pip"]
 
@@ -119,7 +123,7 @@ disallow_untyped_defs = false
 disallow_incomplete_defs = false
 
 [[tool.mypy.overrides]]
-module = ["zarr.*", "dask.*", "tyro.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*", "spikeinterface.*"]
+module = ["zarr.*", "dask.*", "tyro.*", "rich.*", "panel.*", "bokeh.*", "param.*", "mtscomp.*", "s3fs.*", "wavpack_numcodecs.*", "fsspec.*", "spikeinterface.*", "numba.*", "scipy.*", "numcodecs.*"]
 ignore_missing_imports = true
 # zarr v3 generics are in flux; suppress type-arg errors in our build module
 [[tool.mypy.overrides]]

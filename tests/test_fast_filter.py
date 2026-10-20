@@ -77,7 +77,7 @@ class TestInstallUninstall:
         """End-to-end: BandpassFilterRecording with and without the patch."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import BandpassFilterRecording
+        from spikeinterface.preprocessing.filter import BandpassFilterRecording
 
         rng = np.random.default_rng(0)
         T, C = 60_000, 64  # 2 s at 30 kHz, 64 channels

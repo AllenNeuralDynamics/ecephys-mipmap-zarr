@@ -168,7 +168,7 @@ class TestPhaseShiftRecordingPatch:
     def test_int_parent_yields_float32_phase_shift(self):
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         rng = np.random.default_rng(0)
         n_ch, fs = 8, 30_000.0
@@ -189,7 +189,7 @@ class TestPhaseShiftRecordingPatch:
         """Float-dtype parents should follow SI's original __init__ behavior."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         rng = np.random.default_rng(0)
         n_ch, fs = 8, 30_000.0
@@ -209,7 +209,7 @@ class TestPhaseShiftRecordingPatch:
         """If the caller explicitly pins an int dtype, don't override it."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         rng = np.random.default_rng(0)
         n_ch, fs = 8, 30_000.0
@@ -235,7 +235,7 @@ class TestPhaseShiftRecordingPatch:
         """
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         # Build a realistic-ish int16 recording: band-limited noise scaled to
         # int16 range.
@@ -272,7 +272,7 @@ class TestPhaseShiftRecordingPatch:
         """User passing dtype='float32' should get the fast path, not stock."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         rng = np.random.default_rng(0)
         n_ch, fs = 8, 30_000.0
@@ -293,7 +293,7 @@ class TestPhaseShiftRecordingPatch:
         """After install, each segment should carry its precomputed FIR kernel."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         rng = np.random.default_rng(0)
         n_ch, fs = 8, 30_000.0
@@ -315,7 +315,7 @@ class TestPhaseShiftRecordingPatch:
         """get_traces(start=0, ...) must zero-pad the left margin correctly."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import PhaseShiftRecording
+        from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
         rng = np.random.default_rng(0)
         n_ch, fs = 4, 30_000.0

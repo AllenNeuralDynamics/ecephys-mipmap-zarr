@@ -62,7 +62,7 @@ class TestInstallUninstall:
         """End-to-end on the fast path: global reference, no groups, median operator."""
         pytest.importorskip("spikeinterface")
         import spikeinterface as si
-        from spikeinterface.preprocessing import CommonReferenceRecording
+        from spikeinterface.preprocessing.common_reference import CommonReferenceRecording
 
         rng = np.random.default_rng(0)
         T, C = 60_000, 64

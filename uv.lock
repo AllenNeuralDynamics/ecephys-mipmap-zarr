@@ -6,10 +6,10 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version < '3.12' and sys_platform == 'emscripten'",
@@ -263,7 +263,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -763,7 +763,7 @@ s3 = [
 si = [
     { name = "numba" },
     { name = "scipy" },
-    { name = "spikeinterface" },
+    { name = "spikeinterface", marker = "python_full_version >= '3.14'" },
     { name = "wavpack-numcodecs" },
 ]
 viewer = [
@@ -783,6 +783,7 @@ dev = [
     { name = "matplotlib" },
     { name = "mtscomp" },
     { name = "mypy" },
+    { name = "numba" },
     { name = "panel" },
     { name = "param" },
     { name = "pytest" },
@@ -790,6 +791,8 @@ dev = [
     { name = "rich" },
     { name = "ruff" },
     { name = "s3fs" },
+    { name = "scipy" },
+    { name = "spikeinterface", marker = "python_full_version >= '3.14'" },
     { name = "tyro" },
     { name = "wavpack-numcodecs" },
 ]
@@ -801,6 +804,7 @@ jupyter = [
     { name = "matplotlib" },
     { name = "mtscomp" },
     { name = "mypy" },
+    { name = "numba" },
     { name = "panel" },
     { name = "param" },
     { name = "pip" },
@@ -809,6 +813,8 @@ jupyter = [
     { name = "rich" },
     { name = "ruff" },
     { name = "s3fs" },
+    { name = "scipy" },
+    { name = "spikeinterface", marker = "python_full_version >= '3.14'" },
     { name = "tyro" },
     { name = "wavpack-numcodecs" },
 ]
@@ -828,7 +834,7 @@ requires-dist = [
     { name = "rich", marker = "extra == 'cli'" },
     { name = "s3fs", marker = "extra == 's3'" },
     { name = "scipy", marker = "extra == 'si'", specifier = ">=1.10" },
-    { name = "spikeinterface", marker = "extra == 'si'", git = "https://github.com/alejoe91/spikeinterface?rev=zarrv3" },
+    { name = "spikeinterface", marker = "python_full_version >= '3.14' and extra == 'si'", specifier = ">=0.105.1" },
     { name = "tyro", marker = "extra == 'cli'", specifier = ">=0.8" },
     { name = "wavpack-numcodecs", marker = "extra == 'si'" },
     { name = "wavpack-numcodecs", marker = "extra == 'wavpack'" },
@@ -844,6 +850,7 @@ dev = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mtscomp" },
     { name = "mypy" },
+    { name = "numba", specifier = ">=0.59" },
     { name = "panel", specifier = ">=1.0" },
     { name = "param" },
     { name = "pytest" },
@@ -851,6 +858,8 @@ dev = [
     { name = "rich" },
     { name = "ruff" },
     { name = "s3fs" },
+    { name = "scipy", specifier = ">=1.10" },
+    { name = "spikeinterface", marker = "python_full_version >= '3.14'", specifier = ">=0.105.1" },
     { name = "tyro", specifier = ">=0.8" },
     { name = "wavpack-numcodecs" },
 ]
@@ -862,6 +871,7 @@ jupyter = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mtscomp" },
     { name = "mypy" },
+    { name = "numba", specifier = ">=0.59" },
     { name = "panel", specifier = ">=1.0" },
     { name = "param" },
     { name = "pip" },
@@ -870,6 +880,8 @@ jupyter = [
     { name = "rich" },
     { name = "ruff" },
     { name = "s3fs" },
+    { name = "scipy", specifier = ">=1.10" },
+    { name = "spikeinterface", marker = "python_full_version >= '3.14'", specifier = ">=0.105.1" },
     { name = "tyro", specifier = ">=0.8" },
     { name = "wavpack-numcodecs" },
 ]
@@ -1091,7 +1103,7 @@ name = "importlib-metadata"
 version = "9.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zipp", marker = "python_full_version < '3.12'" },
+    { name = "zipp" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/01/15bb152d77b21318514a96f43af312635eb2500c96b55398d020c93d86ea/importlib_metadata-9.0.0.tar.gz", hash = "sha256:a4f57ab599e6a2e3016d7595cfd72eb4661a5106e787a95bcc90c7105b831efc", size = 56405, upload-time = "2026-03-20T06:42:56.999Z" }
 wheels = [
@@ -1158,17 +1170,17 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "colorama", marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
-    { name = "decorator", marker = "python_full_version < '3.12'" },
-    { name = "ipython-pygments-lexers", marker = "python_full_version < '3.12'" },
-    { name = "jedi", marker = "python_full_version < '3.12'" },
-    { name = "matplotlib-inline", marker = "python_full_version < '3.12'" },
-    { name = "pexpect", marker = "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "prompt-toolkit", marker = "python_full_version < '3.12'" },
-    { name = "pygments", marker = "python_full_version < '3.12'" },
-    { name = "stack-data", marker = "python_full_version < '3.12'" },
-    { name = "traitlets", marker = "python_full_version < '3.12'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "decorator" },
+    { name = "ipython-pygments-lexers" },
+    { name = "jedi" },
+    { name = "matplotlib-inline" },
+    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "prompt-toolkit" },
+    { name = "pygments" },
+    { name = "stack-data" },
+    { name = "traitlets" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a6/60/2111715ea11f39b1535bed6024b7dec7918b71e5e5d30855a5b503056b50/ipython-9.10.0.tar.gz", hash = "sha256:cd9e656be97618a0676d058134cd44e6dc7012c0e5cb36a9ce96a8c904adaf77", size = 4426526, upload-time = "2026-02-02T10:00:33.594Z" }
 wheels = [
@@ -1184,23 +1196,23 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'win32'",
-    "python_full_version == '3.12.*' and sys_platform == 'win32'",
     "python_full_version == '3.13.*' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.13.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'win32'",
+    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "colorama", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
-    { name = "decorator", marker = "python_full_version >= '3.12'" },
-    { name = "ipython-pygments-lexers", marker = "python_full_version >= '3.12'" },
-    { name = "jedi", marker = "python_full_version >= '3.12'" },
-    { name = "matplotlib-inline", marker = "python_full_version >= '3.12'" },
-    { name = "pexpect", marker = "python_full_version >= '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "prompt-toolkit", marker = "python_full_version >= '3.12'" },
-    { name = "pygments", marker = "python_full_version >= '3.12'" },
-    { name = "stack-data", marker = "python_full_version >= '3.12'" },
-    { name = "traitlets", marker = "python_full_version >= '3.12'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "decorator" },
+    { name = "ipython-pygments-lexers" },
+    { name = "jedi" },
+    { name = "matplotlib-inline" },
+    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "prompt-toolkit" },
+    { name = "pygments" },
+    { name = "stack-data" },
+    { name = "traitlets" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/86/28/a4698eda5a8928a45d6b693578b135b753e14fa1c2b36ee9441e69a45576/ipython-9.11.0.tar.gz", hash = "sha256:2a94bc4406b22ecc7e4cb95b98450f3ea493a76bec8896cda11b78d7752a6667", size = 4427354, upload-time = "2026-03-05T08:57:30.549Z" }
 wheels = [
@@ -1886,16 +1898,16 @@ wheels = [
 
 [[package]]
 name = "neo"
-version = "0.14.4"
+version = "0.14.6"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },
     { name = "quantities" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7f/b1/e9228d616c817098b673ab990e82acb431856559f4e0235a687854df1ef4/neo-0.14.4.tar.gz", hash = "sha256:cbe24031c514543005ec698d8fe024b95a0839e9efd469bf6f8290dc3d86b3b5", size = 5085927, upload-time = "2026-03-12T09:59:56.893Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/72/f27c73f20b77890d8121899e802031dc7961b7420cc4724aa4ea73e0411e/neo-0.14.6.tar.gz", hash = "sha256:450ee8704c61929ca85ce0e62c338c3c461c2325318703627d8a573f23779ab6", size = 5119508, upload-time = "2026-10-15T14:16:03.841Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ac/66/93359047a9c7ede7c6319f58b2cee3be19552f57ef5380fe95cb812272fb/neo-0.14.4-py3-none-any.whl", hash = "sha256:0cd863424e35dddd768d713cfcc48cb06ab127fe1b5b132a0793c82975de5be4", size = 697727, upload-time = "2026-03-12T09:59:54.609Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/38/6fc6390e5f3a6478ab0ccb21e00aaa3a12ac22a41a988a1e0fcea9adad3c/neo-0.14.6-py3-none-any.whl", hash = "sha256:96b79fb4a58885c21047cb1d7f31cccf388b6c1f293d8b146ade9bc5b371c4b8", size = 729833, upload-time = "2026-10-15T14:16:01.968Z" },
 ]
 
 [[package]]
@@ -2189,7 +2201,7 @@ name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "ptyprocess", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "ptyprocess" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/42/92/cc564bf6381ff43ce1f4d06852fc19a2f11d180f23dc32d9588bee2f149d/pexpect-4.9.0.tar.gz", hash = "sha256:ee7d41123f3c9911050ea2c2dac107568dc43b2d3b0c7557a33212c398ead30f", size = 166450, upload-time = "2023-11-25T09:07:26.339Z" }
 wheels = [
@@ -2312,16 +2324,16 @@ wheels = [
 
 [[package]]
 name = "probeinterface"
-version = "0.3.2"
+version = "0.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
     { name = "packaging" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ad/b6/149976dac9228c39a80fd1dee1743b3ba8e878b8c425df4304a7ac395aa1/probeinterface-0.3.2.tar.gz", hash = "sha256:8cf02afb1f344be027e1f29e7a2c54fd35b38573ad77890fc5076f957ddf3db5", size = 6681139, upload-time = "2026-03-20T16:06:09.401Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ef/d7/e741c6b6b0bedd3f60d8a074b44525e5b0edf81250658b5a8af16c428337/probeinterface-0.4.2.tar.gz", hash = "sha256:d859f2f7298cc255c8a94370d06b1b7f1328f883d37d7032f8b3eb05705a34bc", size = 6756127, upload-time = "2026-10-16T13:05:55.017Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c9/c9/7cd477fa3cc6e31b643c1ca8d13a7b398fa8c2b6a9c5926cab916729cf43/probeinterface-0.3.2-py3-none-any.whl", hash = "sha256:f288d013697a73836384a9ee8db6bc979764814b981b6730d463d3bd04d5f317", size = 68822, upload-time = "2026-03-20T16:06:08.059Z" },
+    { url = "https://files.pythonhosted.org/packages/c8/20/9e076eaad929cf13607c664c3f13feeea06fe586c7732e674d51d30b0311/probeinterface-0.4.2-py3-none-any.whl", hash = "sha256:c194abc44203932063895f8c342650e89fe314ae1eab02123fe965f4cf7f718b", size = 78501, upload-time = "2026-10-16T13:05:53.582Z" },
 ]
 
 [[package]]
@@ -2962,10 +2974,11 @@ wheels = [
 
 [[package]]
 name = "spikeinterface"
-version = "0.104.1"
-source = { git = "https://github.com/alejoe91/spikeinterface?rev=zarrv3#499de27e7b8c1bd7437ee9eca2fd159d2d9e6ef8" }
+version = "0.105.2"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "neo" },
+    { name = "numcodecs" },
     { name = "numpy" },
     { name = "packaging" },
     { name = "probeinterface" },
@@ -2973,6 +2986,10 @@ dependencies = [
     { name = "threadpoolctl" },
     { name = "tqdm" },
     { name = "zarr" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/dc/ea68d1fa883eac6102fdc764dab305c2a5ed8eb845e53c0dc9f52e99c348/spikeinterface-0.105.2.tar.gz", hash = "sha256:d4ca6e6366562f883f11cd0845281b7bd5ee42413ddd628d50a4d23d61d419ea", size = 979762, upload-time = "2026-10-14T10:36:51.381Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/e8/f5bcd519df7f4a42007d92755a163a17f4250568a111480bc51c2f66fdc1/spikeinterface-0.105.2-py3-none-any.whl", hash = "sha256:5526e090d2fa4e3744fb8d1c47711e5c64009e59e66fe446f0088f568eb02909", size = 1204279, upload-time = "2026-10-14T10:36:49.379Z" },
 ]
 
 [[package]]

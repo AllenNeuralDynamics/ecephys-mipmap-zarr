@@ -7,12 +7,12 @@ leaf and re-instantiating the chain with ``spikeinterface.load``, we
 can stream the same filtered data the sorter saw, without any
 intermediate ``.dat`` / ``.cbin`` materialization.
 
-Requires the ``si`` extra::
+Requires Python >= 3.14 and the ``si`` extra::
 
     pip install ecephys-mipmap-zarr[si]
 
-which pulls in the ``zarrv3`` branch of SpikeInterface and
-``wavpack-numcodecs``.
+SpikeInterface supports zarr 3 only on Python >= 3.14, so the extra
+installs it only there.
 
 Typical usage (e.g. from :func:`ecephys_mipmap_zarr.cli.BuildSettings.cli_cmd`)::
 
@@ -108,7 +108,10 @@ def load_preprocessed_recording(
     try:
         import spikeinterface as si
     except ImportError as e:
-        msg = "spikeinterface is required for analyzer-based builds: pip install ecephys-mipmap-zarr[si]"
+        msg = (
+            "spikeinterface is required for analyzer-based builds: pip install ecephys-mipmap-zarr[si] "
+            "(Python >= 3.14; SpikeInterface pins zarr < 3 on older Pythons)"
+        )
         raise ImportError(msg) from e
 
     if fast_phase_shift:
