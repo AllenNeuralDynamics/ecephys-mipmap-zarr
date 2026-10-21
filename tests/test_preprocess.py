@@ -84,6 +84,30 @@ class TestSIRecordingSource:
         # Full window slice lines up with the underlying recording
         np.testing.assert_array_equal(src[:, :], rec.get_traces(start_frame=200, end_frame=500))
 
+    @pytest.mark.parametrize("read_workers", [1, 3])
+    def test_split_reads_match_one_read(self, read_workers):
+        rec = _FakeRecording(1000, 4)
+        src = SIRecordingSource(rec, start_sample=13, read_samples=64, read_workers=read_workers)
+        np.testing.assert_array_equal(src[5:900, :], rec.get_traces(start_frame=18, end_frame=913))
+        np.testing.assert_array_equal(src[:, slice(1, 3)], rec.get_traces(start_frame=13)[:, 1:3])
+
+    def test_split_reads_stay_under_read_samples(self):
+        rec = _FakeRecording(1000, 4)
+        calls = []
+        original = rec.get_traces
+
+        def recording_get_traces(start_frame=None, end_frame=None):
+            calls.append(end_frame - start_frame)
+            return original(start_frame=start_frame, end_frame=end_frame)
+
+        rec.get_traces = recording_get_traces
+        SIRecordingSource(rec, read_samples=300)[0:1000, :]
+        assert calls == [300, 300, 300, 100]
+
+    def test_rejects_nonpositive_read_samples(self):
+        with pytest.raises(ValueError):
+            SIRecordingSource(_FakeRecording(100, 4), read_samples=0)
+
     def test_window_rejects_out_of_range(self):
         rec = _FakeRecording(100, 4)
         with pytest.raises(ValueError):

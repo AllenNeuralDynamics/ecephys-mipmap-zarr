@@ -29,6 +29,9 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -56,6 +59,7 @@ def load_preprocessed_recording(
     fast_phase_shift: bool = True,
     fast_filter: bool = True,
     fast_cmr: bool = True,
+    fuse: bool = False,
 ) -> BaseRecording:
     """Reconstruct the preprocessed recording from a SortingAnalyzer zarr.
 
@@ -99,6 +103,14 @@ def load_preprocessed_recording(
         original FFT implementation.  When SI's ``PhaseShiftRecording`` has
         its own ``method="fir"``, that is selected through the provenance
         kwargs instead of patching.
+    fuse : bool, optional
+        When True, rebuild the chain with SpikeInterface's FIR phase shift
+        and FIR highpass and run phase shift, highpass and CMR as one
+        ``FusedFIRReferenceRecording`` pass (see :func:`_fuse_chain`).  The
+        FIR highpass replaces the chain's Butterworth, so the output is not
+        sample-equivalent to the sorter's.  The ``fast_*`` patches are not
+        installed.  Needs a SpikeInterface with
+        ``spikeinterface.preprocessing.fused_fir_reference``.  Default False.
 
     Returns
     -------
@@ -115,6 +127,9 @@ def load_preprocessed_recording(
             "(Python >= 3.14; SpikeInterface pins zarr < 3 on older Pythons)"
         )
         raise ImportError(msg) from e
+
+    if fuse:
+        fast_phase_shift = fast_filter = fast_cmr = False
 
     use_si_fir_phase_shift = False
     if fast_phase_shift:
@@ -146,6 +161,8 @@ def load_preprocessed_recording(
         _select_fir_phase_shift(prov)
     rec: BaseRecording = si.load(prov)
     _configure_wavpack_decode_threads(rec, wavpack_decode_threads)
+    if fuse:
+        rec = _fuse_chain(rec)
     return rec
 
 
@@ -240,6 +257,26 @@ class SIRecordingSource:
     :func:`build_mipmap`.  The engine reads source data as
     ``source[t0:t1, :]`` and expects ``(T, C)`` shape — which matches
     :meth:`BaseRecording.get_traces`.
+
+    The engine asks for a whole raw shard at a time (~35 s at 30 kHz), far
+    past the ~1 s at which SpikeInterface's steps run fastest, so
+    *read_samples* splits each request into smaller ``get_traces`` calls.
+
+    Parameters
+    ----------
+    rec : BaseRecording
+        Recording to read.
+    start_sample, n_samples : int, optional
+        Window of *rec* to expose; ``n_samples=None`` runs to the end.
+    read_samples : int or None, optional
+        Longest single ``get_traces`` call.  None (default) reads each
+        request in one call.
+    read_workers : int, optional
+        ``get_traces`` calls in flight at once, shared by all callers.
+        Default 1.
+    step_threads : int, optional
+        SpikeInterface thread budget for each call, for the steps that
+        split their own work across threads.  Default 1.
     """
 
     def __init__(
@@ -248,8 +285,20 @@ class SIRecordingSource:
         *,
         start_sample: int = 0,
         n_samples: int | None = None,
+        read_samples: int | None = None,
+        read_workers: int = 1,
+        step_threads: int = 1,
     ) -> None:
+        if read_samples is not None and read_samples < 1:
+            msg = f"read_samples must be >= 1, got {read_samples}"
+            raise ValueError(msg)
         self._rec = rec
+        self._read_samples = read_samples
+        self._read_workers = max(1, int(read_workers))
+        self._step_threads = max(1, int(step_threads))
+        self._pool: ThreadPoolExecutor | None = None
+        self._pool_pid = 0
+        self._pool_lock = threading.Lock()
         full_n = int(rec.get_num_samples())
         if start_sample < 0 or start_sample >= full_n:
             msg = f"start_sample={start_sample} out of range [0, {full_n})"
@@ -292,13 +341,43 @@ class SIRecordingSource:
             raise TypeError(msg)
         start = t_key.start if t_key.start is not None else 0
         stop = t_key.stop if t_key.stop is not None else self._n_samples
-        traces = self._rec.get_traces(
-            start_frame=int(start) + self._start_sample,
-            end_frame=int(stop) + self._start_sample,
-        )
+        t0 = int(start) + self._start_sample
+        t1 = int(stop) + self._start_sample
+        read_samples = self._read_samples
+        if read_samples is None or t1 - t0 <= read_samples:
+            traces = self._get_traces(t0, t1)
+        else:
+            traces = np.empty((t1 - t0, self._n_channels), dtype=self._dtype)
+
+            def fill(a: int) -> None:
+                b = min(a + read_samples, t1)
+                traces[a - t0 : b - t0] = self._get_traces(a, b)
+
+            starts = range(t0, t1, read_samples)
+            if self._read_workers > 1:
+                list(self._get_pool().map(fill, starts))
+            else:
+                for a in starts:
+                    fill(a)
         if ch_key != slice(None):
             traces = traces[:, ch_key]
         return np.asarray(traces)
+
+    def _get_traces(self, t0: int, t1: int) -> np.ndarray:
+        if self._step_threads > 1:
+            from spikeinterface.core import thread_budget
+
+            with thread_budget(self._step_threads):
+                return np.asarray(self._rec.get_traces(start_frame=t0, end_frame=t1))
+        return np.asarray(self._rec.get_traces(start_frame=t0, end_frame=t1))
+
+    def _get_pool(self) -> ThreadPoolExecutor:
+        # A forked child inherits the pool object but not its threads, so it would hang on it.
+        with self._pool_lock:
+            if self._pool is None or self._pool_pid != os.getpid():
+                self._pool = ThreadPoolExecutor(max_workers=self._read_workers, thread_name_prefix="si-read")
+                self._pool_pid = os.getpid()
+            return self._pool
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +503,7 @@ def _clear_rel(d: dict[str, Any]) -> None:
         if isinstance(child, dict) and "class" in child:
             _clear_rel(child)
 
+
 def _select_fir_phase_shift(d: dict[str, Any]) -> None:
     """Switch every ``PhaseShiftRecording`` in the chain to SI's FIR method.
 
@@ -442,3 +522,87 @@ def _select_fir_phase_shift(d: dict[str, Any]) -> None:
         child = d.get("kwargs", {}).get(key)
         if isinstance(child, dict) and "class" in child:
             _select_fir_phase_shift(child)
+
+
+# Highpass kwargs the FIR route can carry over; anything else (filter_order, ftype, ...) has no FIR equivalent.
+_FUSABLE_HIGHPASS_KWARGS = {
+    "freq_min",
+    "dtype",
+    "margin_ms",
+    "method",
+    "ignore_low_freq_error",
+    "transition_low_hz",
+    "stopband_db",
+}
+
+
+def _fuse_chain(rec: BaseRecording) -> BaseRecording:
+    """Rebuild ``[slice] → CMR → [slice] → Highpass → PhaseShift → base`` as one fused FIR pass.
+
+    SI's ``fuse`` matches CMR → FIR filter → FIR phase shift with nothing between them, so the
+    inner channel slices move below the phase shift; the phase shift and highpass act per channel,
+    so slicing first gives the same channels the same output.  Outer slices (bad-channel removal
+    after the CMR) stay on top, since the median is taken over the channels below them.  A chain
+    of any other shape is returned unchanged, with a warning.
+    """
+    try:
+        from spikeinterface.preprocessing.fused_fir_reference import FusedFIRReferenceRecording, fuse
+    except ImportError as e:
+        msg = "fuse=True needs a SpikeInterface with spikeinterface.preprocessing.fused_fir_reference"
+        raise ImportError(msg) from e
+    from spikeinterface.core.channelslice import ChannelSliceRecording
+    from spikeinterface.preprocessing import common_reference, highpass_filter, phase_shift
+    from spikeinterface.preprocessing.common_reference import CommonReferenceRecording
+    from spikeinterface.preprocessing.filter import HighpassFilterRecording
+    from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
+
+    from ecephys_mipmap_zarr._fast_phase_shift import _DEFAULT_N_TAPS
+
+    def peel_slices(node: Any) -> tuple[list[dict[str, Any]], Any]:
+        slices = []
+        while isinstance(node, ChannelSliceRecording):
+            slices.append(node._kwargs)
+            node = node._parent
+        return slices, node
+
+    def apply_slices(node: Any, slices: list[dict[str, Any]]) -> Any:
+        for kw in reversed(slices):
+            node = ChannelSliceRecording(node, kw["channel_ids"], renamed_channel_ids=kw["renamed_channel_ids"])
+        return node
+
+    outer_slices, cmr = peel_slices(rec)
+    if not isinstance(cmr, CommonReferenceRecording):
+        log.warning("fuse: chain has %s where a CommonReferenceRecording was expected; not fusing", type(cmr).__name__)
+        return rec
+    cmr_kw = cmr._kwargs
+    if cmr_kw.get("reference") != "global" or cmr_kw.get("groups") or cmr_kw.get("ref_channel_ids"):
+        log.warning("fuse: CMR is not a plain global reference; not fusing")
+        return rec
+    inner_slices, highpass = peel_slices(cmr._parent)
+    hp_kw = {k: v for k, v in highpass._kwargs.items() if k != "recording"}
+    if not isinstance(highpass, HighpassFilterRecording) or not set(hp_kw) <= _FUSABLE_HIGHPASS_KWARGS:
+        log.warning(
+            "fuse: no plain highpass below the CMR (%s, kwargs %s); not fusing", type(highpass).__name__, sorted(hp_kw)
+        )
+        return rec
+    shift = highpass._parent
+    if not isinstance(shift, PhaseShiftRecording):
+        log.warning("fuse: %s below the highpass instead of a PhaseShiftRecording; not fusing", type(shift).__name__)
+        return rec
+
+    chain = apply_slices(shift._parent, inner_slices)
+    chain = phase_shift(
+        chain,
+        margin_ms=shift._kwargs["margin_ms"],
+        inter_sample_shift=shift._kwargs.get("inter_sample_shift"),
+        method="fir",
+        n_taps=_DEFAULT_N_TAPS,
+        dtype="float32",
+    )
+    fir_design = {k: hp_kw[k] for k in ("transition_low_hz", "stopband_db") if k in hp_kw}
+    chain = highpass_filter(chain, freq_min=hp_kw["freq_min"], method="fir", dtype=hp_kw.get("dtype"), **fir_design)
+    chain = common_reference(chain, reference="global", operator=cmr_kw["operator"], dtype=cmr_kw.get("dtype"))
+    fused = fuse(chain)
+    if not isinstance(fused, FusedFIRReferenceRecording):
+        log.warning("fuse: SpikeInterface did not fuse the rebuilt chain; using it unfused")
+    return apply_slices(fused, outer_slices)

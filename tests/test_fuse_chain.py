@@ -1,0 +1,93 @@
+"""Tests for rebuilding the AIND preprocessing chain as one fused FIR pass."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+pytest.importorskip("spikeinterface.preprocessing.fused_fir_reference")
+
+from spikeinterface.core import NumpyRecording
+from spikeinterface.core.channelslice import ChannelSliceRecording
+from spikeinterface.preprocessing import common_reference, highpass_filter, phase_shift
+from spikeinterface.preprocessing.fused_fir_reference import FusedFIRReferenceRecording
+
+from ecephys_mipmap_zarr._fast_phase_shift import _DEFAULT_N_TAPS
+from ecephys_mipmap_zarr.preprocess import SIRecordingSource, _fuse_chain
+
+FS = 30_000.0
+N_CHANNELS = 12
+
+
+def _raw():
+    rng = np.random.default_rng(0)
+    traces = (rng.standard_normal((60_000, N_CHANNELS)) * 30).astype("int16")
+    rec = NumpyRecording([traces], FS)
+    rec.set_property("inter_sample_shift", (np.arange(N_CHANNELS) % 6) / 13.0)
+    return rec
+
+
+def _aind_chain(raw, kept):
+    """The AIND shape: PhaseShift → Highpass → ChannelSlice → CMR."""
+    rec = phase_shift(raw, margin_ms=100.0)
+    rec = highpass_filter(rec, freq_min=300.0, margin_ms=5.0, dtype="int16")
+    rec = ChannelSliceRecording(rec, kept)
+    return common_reference(rec, reference="global", operator="median", dtype="int16")
+
+
+def _unfused_fir(raw, kept):
+    """The same steps with the slice first and FIR methods, unfused."""
+    rec = ChannelSliceRecording(raw, kept)
+    rec = phase_shift(rec, margin_ms=100.0, method="fir", n_taps=_DEFAULT_N_TAPS, dtype="float32")
+    rec = highpass_filter(rec, freq_min=300.0, method="fir", dtype="int16")
+    return common_reference(rec, reference="global", operator="median", dtype="int16")
+
+
+def _assert_rounding_close(actual, expected):
+    """Equal up to float32 rounding before the int16 cast.
+
+    A rounding flip of one count moves an even-count median by half a count, which can round to two.
+    """
+    diff = np.abs(actual.astype(np.int32) - expected)
+    assert diff.max() <= 2
+    assert (diff > 0).mean() < 1e-3
+
+
+KEPT = [cid for i, cid in enumerate(_raw().channel_ids) if i not in (2, 7)]
+
+
+def test_fuses_aind_chain():
+    raw = _raw()
+    fused = _fuse_chain(_aind_chain(raw, KEPT))
+    assert isinstance(fused, FusedFIRReferenceRecording)
+    assert list(fused.channel_ids) == KEPT
+    assert fused.get_dtype() == np.int16
+
+
+def test_fused_matches_unfused_fir_chain():
+    raw = _raw()
+    fused = _fuse_chain(_aind_chain(raw, KEPT)).get_traces(start_frame=10_000, end_frame=40_000)
+    expected = _unfused_fir(raw, KEPT).get_traces(start_frame=10_000, end_frame=40_000)
+    _assert_rounding_close(fused, expected)
+
+
+def test_keeps_outer_slice_on_top():
+    raw = _raw()
+    outer = KEPT[:5]
+    fused = _fuse_chain(ChannelSliceRecording(_aind_chain(raw, KEPT), outer))
+    assert list(fused.channel_ids) == outer
+    full = _fuse_chain(_aind_chain(raw, KEPT)).get_traces(start_frame=10_000, end_frame=20_000)
+    np.testing.assert_array_equal(fused.get_traces(start_frame=10_000, end_frame=20_000), full[:, :5])
+
+
+def test_leaves_other_chains_unchanged():
+    raw = _raw()
+    rec = common_reference(highpass_filter(raw, freq_min=300.0, filter_order=3), reference="global")
+    assert _fuse_chain(rec) is rec
+
+
+def test_split_threaded_reads_match_one_read():
+    fused = _fuse_chain(_aind_chain(_raw(), KEPT))
+    whole = SIRecordingSource(fused)[5_000:50_000, :]
+    split = SIRecordingSource(fused, read_samples=7_000, read_workers=3, step_threads=2)[5_000:50_000, :]
+    _assert_rounding_close(split, whole)
