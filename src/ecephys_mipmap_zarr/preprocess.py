@@ -31,7 +31,8 @@ import copy
 import logging
 import os
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -56,6 +57,7 @@ def load_preprocessed_recording(
     analyzer_storage_options: dict[str, Any] | None = None,
     raw_storage_options: dict[str, Any] | None = None,
     wavpack_decode_threads: int = 4,
+    raw_cache_chunks: int = 0,
     fast_phase_shift: bool = True,
     fast_filter: bool = True,
     fast_cmr: bool = True,
@@ -93,6 +95,10 @@ def load_preprocessed_recording(
         leaf zarr array.  Set to ``1`` for single-threaded decode.  Only
         applied when the leaf codec exposes ``num_decoding_threads``
         (``wavpack-numcodecs``); silently ignored otherwise.  Default 4.
+    raw_cache_chunks : int, optional
+        Keep this many decoded raw chunks and serve raw reads from them, so
+        the margins that neighbouring reads share are fetched and decoded
+        once.  Size it to cover the reads in flight; 0 (default) disables.
     fast_phase_shift : bool, optional
         When True (default), monkey-patch SI's
         ``apply_frequency_shift`` with a 32-tap numba sinc FIR
@@ -161,6 +167,8 @@ def load_preprocessed_recording(
         _select_fir_phase_shift(prov)
     rec: BaseRecording = si.load(prov)
     _configure_wavpack_decode_threads(rec, wavpack_decode_threads)
+    if raw_cache_chunks > 0:
+        _install_chunk_cache(rec, raw_cache_chunks)
     if fuse:
         rec = _fuse_chain(rec)
     return rec
@@ -209,6 +217,101 @@ def _leaf_segment_arrays(rec: Any) -> list[Any]:
         return []
     arrays = [getattr(seg, "_timeseries", None) for seg in getattr(leaf, "_recording_segments", [])]
     return arrays if arrays and all(a is not None for a in arrays) else []
+
+
+def _install_chunk_cache(rec: Any, max_chunks: int) -> None:
+    """Route each leaf segment's raw reads through a :class:`_DecodedChunkCache`."""
+    leaf: Any = rec
+    while getattr(leaf, "_parent", None) is not None:
+        leaf = leaf._parent
+    segments = [seg for seg in getattr(leaf, "_recording_segments", []) if hasattr(seg, "_timeseries")]
+    if not segments:
+        log.warning("raw_cache_chunks: leaf %s has no zarr-backed segments; not caching", type(leaf).__name__)
+        return
+    for seg in segments:
+        if not isinstance(seg._timeseries, _DecodedChunkCache):
+            seg._timeseries = _DecodedChunkCache(seg._timeseries, max_chunks)
+
+
+class _DecodedChunkCache:
+    """Serve time slices of a ``(T, C)`` zarr array from whole decoded chunks, keeping the most recent *max_chunks*.
+
+    Concurrent readers of the same chunk share one read.  Each run of missing chunks is one zarr read, which
+    decodes its chunks concurrently.
+    """
+
+    def __init__(self, array: Any, max_chunks: int) -> None:
+        self._array = array
+        self.shape = tuple(array.shape)
+        self.dtype = array.dtype
+        self._chunk_len = int(array.chunks[0])
+        self._max_chunks = max_chunks
+        self._chunks: OrderedDict[int, Future[np.ndarray]] = OrderedDict()
+        self._lock = threading.Lock()
+        self._pid = os.getpid()
+
+    def __getitem__(self, key: Any) -> np.ndarray:
+        if not isinstance(key, slice) or key.step not in (None, 1):
+            return np.asarray(self._array[key])
+        t0, t1, _ = key.indices(self.shape[0])
+        if t1 <= t0:
+            return np.asarray(self._array[t0:t0])
+        n = self._chunk_len
+        first, last = t0 // n, (t1 - 1) // n
+        wanted, missing = self._claim(range(first, last + 1))
+        try:
+            for run in _contiguous_runs(missing):
+                block = np.asarray(self._array[run[0] * n : min((run[-1] + 1) * n, self.shape[0])])
+                for i, c in enumerate(run):
+                    wanted[c].set_result(block[i * n : (i + 1) * n])
+        except BaseException as e:
+            # Other readers may be waiting on these entries.
+            self._abandon({c: wanted[c] for c in missing if not wanted[c].done()}, e)
+            raise
+        out = np.empty((t1 - t0, *self.shape[1:]), dtype=self.dtype)
+        for c, future in wanted.items():
+            a, b = max(t0, c * n), min(t1, (c + 1) * n)
+            out[a - t0 : b - t0] = future.result()[a - c * n : b - c * n]
+        return out
+
+    def _claim(self, indices: range) -> tuple[dict[int, Future[np.ndarray]], list[int]]:
+        """Look up *indices*, registering a pending entry for each chunk no one is reading yet."""
+        wanted: dict[int, Future[np.ndarray]] = {}
+        missing = []
+        with self._lock:
+            if self._pid != os.getpid():
+                # Pending entries from a parent process would never be filled here.
+                self._chunks.clear()
+                self._pid = os.getpid()
+            for c in indices:
+                future = self._chunks.get(c)
+                if future is None:
+                    future = self._chunks[c] = Future()
+                    missing.append(c)
+                else:
+                    self._chunks.move_to_end(c)
+                wanted[c] = future
+            while len(self._chunks) > self._max_chunks:
+                self._chunks.popitem(last=False)
+        return wanted, missing
+
+    def _abandon(self, pending: dict[int, Future[np.ndarray]], error: BaseException) -> None:
+        with self._lock:
+            for c, future in pending.items():
+                if self._chunks.get(c) is future:
+                    del self._chunks[c]
+        for future in pending.values():
+            future.set_exception(error)
+
+
+def _contiguous_runs(indices: list[int]) -> list[list[int]]:
+    runs: list[list[int]] = []
+    for i in indices:
+        if runs and runs[-1][-1] == i - 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
 
 
 def build_source_metadata(rec: BaseRecording) -> dict[str, Any]:

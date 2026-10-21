@@ -12,12 +12,15 @@ requires the ``si`` extra and network access.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 import pytest
 
 from ecephys_mipmap_zarr.preprocess import (
     SIRecordingSource,
     _clear_rel,
+    _DecodedChunkCache,
     _fix_leaf,
     _select_fir_phase_shift,
     _unwrap_outer_channelslice,
@@ -226,3 +229,67 @@ class TestSelectFirPhaseShift:
         _select_fir_phase_shift(hp)
         assert ps["kwargs"]["method"] == "fir"
         assert ps["kwargs"]["dtype"] == "<i2"
+
+
+class _CountingArray:
+    """A chunked (T, C) array that records the time slices it is asked for."""
+
+    def __init__(self, data, chunk_len, fail_first=0):
+        self._data = data
+        self.shape = data.shape
+        self.dtype = data.dtype
+        self.chunks = (chunk_len, data.shape[1])
+        self.reads = []
+        self._fail_first = fail_first
+
+    def __getitem__(self, key):
+        if self._fail_first:
+            self._fail_first -= 1
+            raise OSError("transient")
+        self.reads.append((key.start, key.stop))
+        return self._data[key].copy()
+
+
+class TestDecodedChunkCache:
+    @staticmethod
+    def _array(**kwargs):
+        data = np.random.default_rng(0).integers(-1000, 1000, size=(1050, 3)).astype("int16")
+        return data, _CountingArray(data, 100, **kwargs)
+
+    def test_slices_match_array(self):
+        data, arr = self._array()
+        cache = _DecodedChunkCache(arr, max_chunks=4)
+        for a, b in [(0, 1050), (95, 105), (1000, 1050), (250, 251), (300, 300)]:
+            np.testing.assert_array_equal(cache[a:b], data[a:b])
+        assert cache.shape == data.shape
+
+    def test_overlapping_reads_read_each_chunk_once(self):
+        data, arr = self._array()
+        cache = _DecodedChunkCache(arr, max_chunks=4)
+        for a in range(0, 500, 50):
+            np.testing.assert_array_equal(cache[max(0, a - 20) : a + 70], data[max(0, a - 20) : a + 70])
+        assert arr.reads == [(0, 100), (100, 200), (200, 300), (300, 400), (400, 500), (500, 600)]
+
+    def test_one_read_per_run_of_missing_chunks(self):
+        _, arr = self._array()
+        cache = _DecodedChunkCache(arr, max_chunks=8)
+        cache[150:250]
+        cache[0:550]
+        assert arr.reads == [(100, 300), (0, 100), (300, 600)]
+
+    def test_concurrent_reads_share_chunks(self):
+        data, arr = self._array()
+        cache = _DecodedChunkCache(arr, max_chunks=16)
+        with ThreadPoolExecutor(8) as pool:
+            outs = list(pool.map(lambda a: cache[a : a + 130], range(0, 900, 30)))
+        for a, out in zip(range(0, 900, 30), outs, strict=True):
+            np.testing.assert_array_equal(out, data[a : a + 130])
+        covered = sorted(t for start, stop in arr.reads for t in range(start, stop, 100))
+        assert covered == list(range(0, 1000, 100))
+
+    def test_failed_read_is_retried(self):
+        data, arr = self._array(fail_first=1)
+        cache = _DecodedChunkCache(arr, max_chunks=4)
+        with pytest.raises(OSError):
+            cache[0:150]
+        np.testing.assert_array_equal(cache[0:150], data[0:150])
