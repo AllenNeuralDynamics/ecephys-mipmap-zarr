@@ -152,16 +152,16 @@ def load_preprocessed_recording(
 def _configure_wavpack_decode_threads(rec: Any, num_threads: int) -> None:
     """Set ``num_decoding_threads`` on the leaf zarr's WavPack codec.
 
-    Walks ``_parent_recording`` / ``parent_recording`` down to the leaf
-    ``ZarrRecordingExtractor``, pulls its backing zarr array, and mutates
-    the codec instance in place.  Best-effort: logs and returns silently
-    if the chain, array, or codec doesn't look like WavPack.
+    Walks ``_parent`` down to the leaf ``ZarrRecordingExtractor``, pulls
+    its backing zarr array, and mutates the codec instance in place.
+    Best-effort: logs and returns silently if the chain, array, or codec
+    doesn't look like WavPack.
     """
     if num_threads <= 0:
         return
     leaf: Any = rec
     for _ in range(64):
-        parent = getattr(leaf, "_parent_recording", None) or getattr(leaf, "parent_recording", None)
+        parent = getattr(leaf, "_parent", None)
         if parent is None:
             break
         leaf = parent
@@ -219,7 +219,8 @@ def build_source_metadata(rec: BaseRecording) -> dict[str, Any]:
             metadata[prop] = np.asarray(values)
 
     if rec.has_time_vector(segment_index=0):
-        metadata["t_start"] = float(rec.get_times(segment_index=0)[0])
+        # get_times() would read the whole per-sample time vector for its first element.
+        metadata["t_start"] = float(rec.get_start_time(segment_index=0))
 
     # Split annotations into probe (probes_info) + everything else
     annotations = dict(getattr(rec, "_annotations", {}))
