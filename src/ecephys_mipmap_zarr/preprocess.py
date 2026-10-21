@@ -111,11 +111,12 @@ def load_preprocessed_recording(
         kwargs instead of patching.
     fuse : bool, optional
         When True, rebuild the chain with SpikeInterface's FIR phase shift
-        and FIR highpass and run phase shift, highpass and CMR as one
+        and FIR highpass or bandpass and run phase shift, filter and CMR as one
         ``FusedFIRReferenceRecording`` pass (see :func:`_fuse_chain`).  The
-        FIR highpass replaces the chain's Butterworth, so the output is not
-        sample-equivalent to the sorter's.  The ``fast_*`` patches are not
-        installed.  Needs a SpikeInterface with
+        FIR filter replaces the chain's Butterworth, so the output is not
+        sample-equivalent to the sorter's.  A chain that can't be fused runs
+        unfused with the ``fast_*`` patches, which the fused pass never calls.
+        Needs a SpikeInterface with
         ``spikeinterface.preprocessing.fused_fir_reference``.  Default False.
 
     Returns
@@ -133,9 +134,6 @@ def load_preprocessed_recording(
             "(Python >= 3.14; SpikeInterface pins zarr < 3 on older Pythons)"
         )
         raise ImportError(msg) from e
-
-    if fuse:
-        fast_phase_shift = fast_filter = fast_cmr = False
 
     use_si_fir_phase_shift = False
     if fast_phase_shift:
@@ -629,23 +627,25 @@ def _select_fir_phase_shift(d: dict[str, Any]) -> None:
             _select_fir_phase_shift(child)
 
 
-# Highpass kwargs the FIR route can carry over; anything else (filter_order, ftype, ...) has no FIR equivalent.
-_FUSABLE_HIGHPASS_KWARGS = {
+# Filter kwargs the FIR route can carry over; anything else (filter_order, ftype, ...) has no FIR equivalent.
+_FUSABLE_FILTER_KWARGS = {
     "freq_min",
+    "freq_max",
     "dtype",
     "margin_ms",
     "method",
     "ignore_low_freq_error",
     "transition_low_hz",
+    "transition_high_hz",
     "stopband_db",
 }
 
 
 def _fuse_chain(rec: BaseRecording) -> BaseRecording:
-    """Rebuild ``[slice] → CMR → [slice] → Highpass → PhaseShift → base`` as one fused FIR pass.
+    """Rebuild ``[slice] → CMR → [slice] → Highpass|Bandpass → PhaseShift → base`` as one fused FIR pass.
 
     SI's ``fuse`` matches CMR → FIR filter → FIR phase shift with nothing between them, so the
-    inner channel slices move below the phase shift; the phase shift and highpass act per channel,
+    inner channel slices move below the phase shift; the phase shift and filter act per channel,
     so slicing first gives the same channels the same output.  Outer slices (bad-channel removal
     after the CMR) stay on top, since the median is taken over the channels below them.  A chain
     of any other shape is returned unchanged, with a warning.
@@ -656,9 +656,9 @@ def _fuse_chain(rec: BaseRecording) -> BaseRecording:
         msg = "fuse=True needs a SpikeInterface with spikeinterface.preprocessing.fused_fir_reference"
         raise ImportError(msg) from e
     from spikeinterface.core.channelslice import ChannelSliceRecording
-    from spikeinterface.preprocessing import common_reference, highpass_filter, phase_shift
+    from spikeinterface.preprocessing import bandpass_filter, common_reference, highpass_filter, phase_shift
     from spikeinterface.preprocessing.common_reference import CommonReferenceRecording
-    from spikeinterface.preprocessing.filter import HighpassFilterRecording
+    from spikeinterface.preprocessing.filter import BandpassFilterRecording, HighpassFilterRecording
     from spikeinterface.preprocessing.phase_shift import PhaseShiftRecording
 
     from ecephys_mipmap_zarr._fast_phase_shift import _DEFAULT_N_TAPS
@@ -683,16 +683,21 @@ def _fuse_chain(rec: BaseRecording) -> BaseRecording:
     if cmr_kw.get("reference") != "global" or cmr_kw.get("groups") or cmr_kw.get("ref_channel_ids"):
         log.warning("fuse: CMR is not a plain global reference; not fusing")
         return rec
-    inner_slices, highpass = peel_slices(cmr._parent)
-    hp_kw = {k: v for k, v in highpass._kwargs.items() if k != "recording"}
-    if not isinstance(highpass, HighpassFilterRecording) or not set(hp_kw) <= _FUSABLE_HIGHPASS_KWARGS:
+    inner_slices, filt = peel_slices(cmr._parent)
+    filt_kw = {k: v for k, v in filt._kwargs.items() if k != "recording"}
+    if (
+        not isinstance(filt, HighpassFilterRecording | BandpassFilterRecording)
+        or not set(filt_kw) <= _FUSABLE_FILTER_KWARGS
+    ):
         log.warning(
-            "fuse: no plain highpass below the CMR (%s, kwargs %s); not fusing", type(highpass).__name__, sorted(hp_kw)
+            "fuse: no plain highpass or bandpass below the CMR (%s, kwargs %s); not fusing",
+            type(filt).__name__,
+            sorted(filt_kw),
         )
         return rec
-    shift = highpass._parent
+    shift = filt._parent
     if not isinstance(shift, PhaseShiftRecording):
-        log.warning("fuse: %s below the highpass instead of a PhaseShiftRecording; not fusing", type(shift).__name__)
+        log.warning("fuse: %s below the filter instead of a PhaseShiftRecording; not fusing", type(shift).__name__)
         return rec
 
     chain = apply_slices(shift._parent, inner_slices)
@@ -704,8 +709,20 @@ def _fuse_chain(rec: BaseRecording) -> BaseRecording:
         n_taps=_DEFAULT_N_TAPS,
         dtype="float32",
     )
-    fir_design = {k: hp_kw[k] for k in ("transition_low_hz", "stopband_db") if k in hp_kw}
-    chain = highpass_filter(chain, freq_min=hp_kw["freq_min"], method="fir", dtype=hp_kw.get("dtype"), **fir_design)
+    fir_design = {k: filt_kw[k] for k in ("transition_low_hz", "transition_high_hz", "stopband_db") if k in filt_kw}
+    if isinstance(filt, BandpassFilterRecording):
+        chain = bandpass_filter(
+            chain,
+            freq_min=filt_kw["freq_min"],
+            freq_max=filt_kw["freq_max"],
+            method="fir",
+            dtype=filt_kw.get("dtype"),
+            **fir_design,
+        )
+    else:
+        chain = highpass_filter(
+            chain, freq_min=filt_kw["freq_min"], method="fir", dtype=filt_kw.get("dtype"), **fir_design
+        )
     chain = common_reference(chain, reference="global", operator=cmr_kw["operator"], dtype=cmr_kw.get("dtype"))
     fused = fuse(chain)
     if not isinstance(fused, FusedFIRReferenceRecording):
