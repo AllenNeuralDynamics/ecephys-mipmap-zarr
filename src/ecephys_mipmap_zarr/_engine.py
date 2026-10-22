@@ -642,7 +642,12 @@ def _write_raw_and_compute_finest(
     raw_total = 0
     pyr_total = 0
 
+    # A source that can hand back (C, T) itself transposes in pieces, off this one thread.
+    read_channels_first = getattr(source, "read_channels_first", None)
+
     def _read_source(t0: int, t1: int) -> npt.NDArray[Any]:
+        if read_channels_first is not None:
+            return np.asarray(read_channels_first(t0, t1))
         return np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)  # (T,C) → (C,T)
 
     read_fn = _retry_on_oserror(_read_source, source_retries)

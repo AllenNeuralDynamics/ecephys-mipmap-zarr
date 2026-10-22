@@ -491,27 +491,44 @@ class SIRecordingSource:
             raise TypeError(msg)
         start = t_key.start if t_key.start is not None else 0
         stop = t_key.stop if t_key.stop is not None else self._n_samples
-        t0 = int(start) + self._start_sample
-        t1 = int(stop) + self._start_sample
-        read_samples = self._read_samples
-        if read_samples is None or t1 - t0 <= read_samples:
-            traces = self._get_traces(t0, t1)
-        else:
-            traces = np.empty((t1 - t0, self._n_channels), dtype=self._dtype)
-
-            def fill(a: int) -> None:
-                b = min(a + read_samples, t1)
-                traces[a - t0 : b - t0] = self._get_traces(a, b)
-
-            starts = range(t0, t1, read_samples)
-            if self._read_workers > 1:
-                list(self._get_pool().map(fill, starts))
-            else:
-                for a in starts:
-                    fill(a)
+        traces = self._read(int(start), int(stop), channels_first=False)
         if ch_key != slice(None):
             traces = traces[:, ch_key]
         return np.asarray(traces)
+
+    def read_channels_first(self, start: int, stop: int) -> np.ndarray:
+        """Window samples ``[start, stop)`` as a C-contiguous ``(C, T)`` array.
+
+        Each read worker transposes its own block as it lands, which is several
+        times faster than transposing the whole request afterwards on one thread.
+        """
+        return self._read(start, stop, channels_first=True)
+
+    def _read(self, start: int, stop: int, *, channels_first: bool) -> np.ndarray:
+        t0 = start + self._start_sample
+        t1 = stop + self._start_sample
+        read_samples = self._read_samples
+        if read_samples is None or t1 - t0 <= read_samples:
+            traces = self._get_traces(t0, t1)
+            return np.ascontiguousarray(traces.T) if channels_first else traces
+        shape = (self._n_channels, t1 - t0) if channels_first else (t1 - t0, self._n_channels)
+        out = np.empty(shape, dtype=self._dtype)
+
+        def fill(a: int) -> None:
+            b = min(a + read_samples, t1)
+            block = self._get_traces(a, b)
+            if channels_first:
+                out[:, a - t0 : b - t0] = block.T
+            else:
+                out[a - t0 : b - t0] = block
+
+        starts = range(t0, t1, read_samples)
+        if self._read_workers > 1:
+            list(self._get_pool().map(fill, starts))
+        else:
+            for a in starts:
+                fill(a)
+        return out
 
     def _get_traces(self, t0: int, t1: int) -> np.ndarray:
         if self._step_threads > 1:

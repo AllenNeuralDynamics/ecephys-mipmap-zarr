@@ -95,6 +95,14 @@ class TestSIRecordingSource:
         np.testing.assert_array_equal(src[5:900, :], rec.get_traces(start_frame=18, end_frame=913))
         np.testing.assert_array_equal(src[:, slice(1, 3)], rec.get_traces(start_frame=13)[:, 1:3])
 
+    @pytest.mark.parametrize(("read_samples", "read_workers"), [(None, 1), (64, 1), (64, 3)])
+    def test_channels_first_is_contiguous_transpose(self, read_samples, read_workers):
+        rec = _FakeRecording(1000, 4)
+        src = SIRecordingSource(rec, start_sample=13, read_samples=read_samples, read_workers=read_workers)
+        out = src.read_channels_first(5, 900)
+        assert out.flags.c_contiguous
+        np.testing.assert_array_equal(out, rec.get_traces(start_frame=18, end_frame=913).T)
+
     def test_split_reads_stay_under_read_samples(self):
         rec = _FakeRecording(1000, 4)
         calls = []
