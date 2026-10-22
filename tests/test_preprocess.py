@@ -287,6 +287,26 @@ class TestDecodedChunkCache:
         covered = sorted(t for start, stop in arr.reads for t in range(start, stop, 100))
         assert covered == list(range(0, 1000, 100))
 
+    def test_read_ahead_fills_following_chunks(self):
+        data, arr = self._array()
+        cache = _DecodedChunkCache(arr, max_chunks=8, read_ahead=3)
+        np.testing.assert_array_equal(cache[0:150], data[0:150])
+        np.testing.assert_array_equal(cache[150:500], data[150:500])
+        covered = sorted(t for start, stop in arr.reads for t in range(start, stop, 100))
+        assert covered[:5] == [0, 100, 200, 300, 400]
+        assert len(covered) == len(set(covered))
+
+    def test_read_ahead_stops_at_array_end(self):
+        data, arr = self._array()
+        cache = _DecodedChunkCache(arr, max_chunks=8, read_ahead=4)
+        np.testing.assert_array_equal(cache[900:1050], data[900:1050])
+        np.testing.assert_array_equal(cache[0:10], data[0:10])
+        assert max(stop for _, stop in arr.reads) == 1050
+
+    def test_read_ahead_capped_by_cache_size(self):
+        _, arr = self._array()
+        assert _DecodedChunkCache(arr, max_chunks=4, read_ahead=8)._read_ahead == 2
+
     def test_failed_read_is_retried(self):
         data, arr = self._array(fail_first=1)
         cache = _DecodedChunkCache(arr, max_chunks=4)

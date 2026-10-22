@@ -58,6 +58,7 @@ def load_preprocessed_recording(
     raw_storage_options: dict[str, Any] | None = None,
     wavpack_decode_threads: int = 4,
     raw_cache_chunks: int = 0,
+    raw_read_ahead_chunks: int = 8,
     fast_phase_shift: bool = True,
     fast_filter: bool = True,
     fast_cmr: bool = True,
@@ -99,6 +100,11 @@ def load_preprocessed_recording(
         Keep this many decoded raw chunks and serve raw reads from them, so
         the margins that neighbouring reads share are fetched and decoded
         once.  Size it to cover the reads in flight; 0 (default) disables.
+    raw_read_ahead_chunks : int, optional
+        With ``raw_cache_chunks``, fetch and decode this many chunks past each
+        raw read in the background, so readers find them ready instead of
+        waiting on storage and decode.  Capped at half of ``raw_cache_chunks``
+        so read-ahead can't evict chunks still in use.  0 disables.  Default 8.
     fast_phase_shift : bool, optional
         When True (default), monkey-patch SI's
         ``apply_frequency_shift`` with a 32-tap numba sinc FIR
@@ -166,7 +172,7 @@ def load_preprocessed_recording(
     rec: BaseRecording = si.load(prov)
     _configure_wavpack_decode_threads(rec, wavpack_decode_threads)
     if raw_cache_chunks > 0:
-        _install_chunk_cache(rec, raw_cache_chunks)
+        _install_chunk_cache(rec, raw_cache_chunks, raw_read_ahead_chunks)
     if fuse:
         rec = _fuse_chain(rec)
     return rec
@@ -217,7 +223,7 @@ def _leaf_segment_arrays(rec: Any) -> list[Any]:
     return arrays if arrays and all(a is not None for a in arrays) else []
 
 
-def _install_chunk_cache(rec: Any, max_chunks: int) -> None:
+def _install_chunk_cache(rec: Any, max_chunks: int, read_ahead: int = 0) -> None:
     """Route each leaf segment's raw reads through a :class:`_DecodedChunkCache`."""
     leaf: Any = rec
     while getattr(leaf, "_parent", None) is not None:
@@ -228,25 +234,30 @@ def _install_chunk_cache(rec: Any, max_chunks: int) -> None:
         return
     for seg in segments:
         if not isinstance(seg._timeseries, _DecodedChunkCache):
-            seg._timeseries = _DecodedChunkCache(seg._timeseries, max_chunks)
+            seg._timeseries = _DecodedChunkCache(seg._timeseries, max_chunks, read_ahead)
 
 
 class _DecodedChunkCache:
     """Serve time slices of a ``(T, C)`` zarr array from whole decoded chunks, keeping the most recent *max_chunks*.
 
     Concurrent readers of the same chunk share one read.  Each run of missing chunks is one zarr read, which
-    decodes its chunks concurrently.
+    decodes its chunks concurrently.  Each read also starts reading the *read_ahead* chunks after it in the
+    background, so a reader moving forward finds its chunks decoded.
     """
 
-    def __init__(self, array: Any, max_chunks: int) -> None:
+    def __init__(self, array: Any, max_chunks: int, read_ahead: int = 0) -> None:
         self._array = array
         self.shape = tuple(array.shape)
         self.dtype = array.dtype
         self._chunk_len = int(array.chunks[0])
+        self._n_chunks = -(-self.shape[0] // self._chunk_len)
         self._max_chunks = max_chunks
+        self._read_ahead = max(0, min(read_ahead, max_chunks // 2))
         self._chunks: OrderedDict[int, Future[np.ndarray]] = OrderedDict()
         self._lock = threading.Lock()
         self._pid = os.getpid()
+        self._pool: ThreadPoolExecutor | None = None
+        self._pool_pid = 0
 
     def __getitem__(self, key: Any) -> np.ndarray:
         if not isinstance(key, slice) or key.step not in (None, 1):
@@ -257,6 +268,18 @@ class _DecodedChunkCache:
         n = self._chunk_len
         first, last = t0 // n, (t1 - 1) // n
         wanted, missing = self._claim(range(first, last + 1))
+        if self._read_ahead:
+            self._start_read_ahead(last + 1)
+        self._read_runs(wanted, missing)
+        out = np.empty((t1 - t0, *self.shape[1:]), dtype=self.dtype)
+        for c, future in wanted.items():
+            a, b = max(t0, c * n), min(t1, (c + 1) * n)
+            out[a - t0 : b - t0] = future.result()[a - c * n : b - c * n]
+        return out
+
+    def _read_runs(self, wanted: dict[int, Future[np.ndarray]], missing: list[int]) -> None:
+        """Read the *missing* chunks and fill their entries in *wanted*."""
+        n = self._chunk_len
         try:
             for run in _contiguous_runs(missing):
                 block = np.asarray(self._array[run[0] * n : min((run[-1] + 1) * n, self.shape[0])])
@@ -266,11 +289,26 @@ class _DecodedChunkCache:
             # Other readers may be waiting on these entries.
             self._abandon({c: wanted[c] for c in missing if not wanted[c].done()}, e)
             raise
-        out = np.empty((t1 - t0, *self.shape[1:]), dtype=self.dtype)
-        for c, future in wanted.items():
-            a, b = max(t0, c * n), min(t1, (c + 1) * n)
-            out[a - t0 : b - t0] = future.result()[a - c * n : b - c * n]
-        return out
+
+    def _start_read_ahead(self, first: int) -> None:
+        stop = min(first + self._read_ahead, self._n_chunks)
+        if first >= stop:
+            return
+        wanted, missing = self._claim(range(first, stop))
+        if not missing:
+            return
+        pool = self._get_pool()
+        for run in _contiguous_runs(missing):
+            # A failure reaches the readers waiting on these entries; nobody waits on the task itself.
+            pool.submit(self._read_runs, {c: wanted[c] for c in run}, run)
+
+    def _get_pool(self) -> ThreadPoolExecutor:
+        # A forked child inherits the pool object but not its threads, so it would hang on it.
+        with self._lock:
+            if self._pool is None or self._pool_pid != os.getpid():
+                self._pool = ThreadPoolExecutor(max_workers=self._read_ahead, thread_name_prefix="raw-read-ahead")
+                self._pool_pid = os.getpid()
+            return self._pool
 
     def _claim(self, indices: range) -> tuple[dict[int, Future[np.ndarray]], list[int]]:
         """Look up *indices*, registering a pending entry for each chunk no one is reading yet."""
