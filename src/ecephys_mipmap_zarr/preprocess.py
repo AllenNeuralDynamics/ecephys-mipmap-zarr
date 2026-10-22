@@ -62,6 +62,7 @@ def load_preprocessed_recording(
     fast_phase_shift: bool = True,
     fast_filter: bool = True,
     fast_cmr: bool = True,
+    fir_filter: bool = False,
     fuse: bool = False,
 ) -> BaseRecording:
     """Reconstruct the preprocessed recording from a SortingAnalyzer zarr.
@@ -115,6 +116,12 @@ def load_preprocessed_recording(
         original FFT implementation.  When SI's ``PhaseShiftRecording`` has
         its own ``method="fir"``, that is selected through the provenance
         kwargs instead of patching.
+    fir_filter : bool, optional
+        When True, switch the chain's highpass and bandpass filters to SpikeInterface's linear-phase
+        FIR (``method="fir"``, overlap-save) with the same cutoffs, in place of the Butterworth the
+        sorter ran.  The output is not sample-equivalent to the sorter's.  Filters with settings that
+        have no FIR equivalent (``filter_order``, ``ftype``, ...) are left as they are.  Needs a
+        SpikeInterface whose ``HighpassFilterRecording`` takes ``method``.  Default False.
     fuse : bool, optional
         When True, rebuild the chain with SpikeInterface's FIR phase shift
         and FIR highpass or bandpass and run phase shift, filter and CMR as one
@@ -169,6 +176,8 @@ def load_preprocessed_recording(
     _clear_rel(prov)
     if use_si_fir_phase_shift:
         _select_fir_phase_shift(prov)
+    if fir_filter:
+        _select_fir_filter(prov)
     rec: BaseRecording = si.load(prov)
     _configure_wavpack_decode_threads(rec, wavpack_decode_threads)
     if raw_cache_chunks > 0:
@@ -663,6 +672,21 @@ def _select_fir_phase_shift(d: dict[str, Any]) -> None:
         child = d.get("kwargs", {}).get(key)
         if isinstance(child, dict) and "class" in child:
             _select_fir_phase_shift(child)
+
+
+def _select_fir_filter(d: dict[str, Any]) -> None:
+    """Switch every highpass and bandpass in the chain whose kwargs carry over to SI's FIR method."""
+    if d.get("class", "").endswith(("HighpassFilterRecording", "BandpassFilterRecording")):
+        kwargs = d.setdefault("kwargs", {})
+        extra = set(kwargs) - _FUSABLE_FILTER_KWARGS - {"recording"}
+        if extra:
+            log.warning("fir_filter: %s has %s, which FIR can't carry; keeping it IIR", d["class"], sorted(extra))
+        else:
+            kwargs["method"] = "fir"
+    for key in ("recording", "parent_recording"):
+        child = d.get("kwargs", {}).get(key)
+        if isinstance(child, dict) and "class" in child:
+            _select_fir_filter(child)
 
 
 # Filter kwargs the FIR route can carry over; anything else (filter_order, ftype, ...) has no FIR equivalent.

@@ -22,6 +22,7 @@ from ecephys_mipmap_zarr.preprocess import (
     _clear_rel,
     _DecodedChunkCache,
     _fix_leaf,
+    _select_fir_filter,
     _select_fir_phase_shift,
     _unwrap_outer_channelslice,
 )
@@ -229,6 +230,40 @@ class TestSelectFirPhaseShift:
         _select_fir_phase_shift(hp)
         assert ps["kwargs"]["method"] == "fir"
         assert ps["kwargs"]["dtype"] == "<i2"
+
+
+class TestSelectFirFilter:
+    @staticmethod
+    def _chain(filter_class, filter_kwargs):
+        leaf = {"class": "spikeinterface.core.zarrextractors.ZarrRecordingExtractor", "kwargs": {}}
+        filt = {
+            "class": f"spikeinterface.preprocessing.filter.{filter_class}",
+            "kwargs": {"recording": leaf, **filter_kwargs},
+        }
+        cmr = {
+            "class": "spikeinterface.preprocessing.common_reference.CommonReferenceRecording",
+            "kwargs": {"recording": filt, "dtype": "<i2"},
+        }
+        return cmr, filt
+
+    @pytest.mark.parametrize(
+        ("filter_class", "kwargs"),
+        [
+            ("HighpassFilterRecording", {"freq_min": 300.0, "margin_ms": 5.0, "dtype": "<i2"}),
+            ("BandpassFilterRecording", {"freq_min": 300.0, "freq_max": 6000.0, "margin_ms": 5.0}),
+        ],
+    )
+    def test_selects_fir_keeping_cutoffs(self, filter_class, kwargs):
+        cmr, filt = self._chain(filter_class, kwargs)
+        _select_fir_filter(cmr)
+        assert filt["kwargs"]["method"] == "fir"
+        assert {k: filt["kwargs"][k] for k in kwargs} == kwargs
+        assert "method" not in cmr["kwargs"]
+
+    def test_keeps_iir_settings_without_fir_equivalent(self):
+        cmr, filt = self._chain("HighpassFilterRecording", {"freq_min": 300.0, "filter_order": 3})
+        _select_fir_filter(cmr)
+        assert "method" not in filt["kwargs"]
 
 
 class _CountingArray:
