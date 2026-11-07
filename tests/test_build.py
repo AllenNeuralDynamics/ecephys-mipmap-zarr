@@ -14,10 +14,11 @@ from ecephys_mipmap_zarr.build import (
     ensure_pyramid,
 )
 from ecephys_mipmap_zarr.metadata import (
+    LOSSLESS_ENCODING,
     BuildConfig,
     ChunkConfig,
+    EncodingConfig,
     MipmapAttrs,
-    QuantizationConfig,
     compute_strides,
     minmax_path,
     n_blocks,
@@ -160,7 +161,8 @@ class TestBuildMipmap:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -199,7 +201,8 @@ class TestBuildMipmap:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -226,7 +229,8 @@ class TestBuildMipmap:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -249,7 +253,8 @@ class TestBuildMipmap:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -266,7 +271,8 @@ class TestBuildMipmap:
                 out,
                 sampling_frequency=30000.0,
                 units="uV",
-                config=BuildConfig(lsb_shift_raw=0, lsb_shift_pyramid=0),
+                config=BuildConfig(),
+                encoding=LOSSLESS_ENCODING,
             )
 
     def test_float32_dtype(self, tmp_path):
@@ -281,7 +287,8 @@ class TestBuildMipmap:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -300,7 +307,8 @@ class TestBuildMipmap:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -327,7 +335,8 @@ class TestBuildMipmap:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -346,7 +355,8 @@ class TestBuildMipmap:
             out_seq,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0, prefetch_chunks=0),
+            config=BuildConfig(chunk_config=cfg, prefetch_chunks=0),
+            encoding=LOSSLESS_ENCODING,
         )
 
         out_pre = tmp_path / "prefetch.zarr"
@@ -355,7 +365,8 @@ class TestBuildMipmap:
             out_pre,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0, prefetch_chunks=2),
+            config=BuildConfig(chunk_config=cfg, prefetch_chunks=2),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root_seq = zarr.open_group(str(out_seq), mode="r", use_consolidated=None)
@@ -483,7 +494,8 @@ class TestAddPyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -505,7 +517,8 @@ class TestAddPyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -523,7 +536,8 @@ class TestAddPyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -544,7 +558,8 @@ class TestAddPyramid:
             full_path,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         # Build raw-only zarr, then add_pyramid
@@ -559,7 +574,8 @@ class TestAddPyramid:
             pyr_path,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         # Compare pyramid values
@@ -594,7 +610,8 @@ class TestAddPyramid:
             sampling_frequency=30000.0,
             units="uV",
             raw_path="recording",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         pyr_root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -637,7 +654,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=self._small_chunk_config(), lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=self._small_chunk_config()),
+            encoding=LOSSLESS_ENCODING,
         )
 
         assert store.n_samples == n_samples
@@ -657,7 +675,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
         # Get modification time of output zarr.json
         mtime = (out / "zarr.json").stat().st_mtime
@@ -667,7 +686,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
         # zarr.json should not have been rewritten
         assert (out / "zarr.json").stat().st_mtime == mtime
@@ -685,7 +705,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
         assert store1.n_samples == 100_000
 
@@ -697,7 +718,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
         assert store2.n_samples == 200_000
 
@@ -713,7 +735,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
         strides1 = store1.strides
 
@@ -723,7 +746,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, min_top_blocks=100, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg, min_top_blocks=100),
+            encoding=LOSSLESS_ENCODING,
         )
         strides2 = store2.strides
         assert strides1 != strides2
@@ -741,7 +765,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=self._small_chunk_config(), lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=self._small_chunk_config()),
+            encoding=LOSSLESS_ENCODING,
         )
         assert isinstance(store, MipmapStore)
 
@@ -756,7 +781,8 @@ class TestEnsurePyramid:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=self._small_chunk_config(), lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=self._small_chunk_config()),
+            encoding=LOSSLESS_ENCODING,
         )
         # Zoomed in → raw fallback via raw_source
         result = store.get_window(0, 100, num_points=1000)
@@ -791,8 +817,8 @@ class TestBuildMipmapQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -811,8 +837,8 @@ class TestBuildMipmapQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -837,8 +863,8 @@ class TestBuildMipmapQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         from ecephys_mipmap_zarr.read import open_mipmap
@@ -863,8 +889,8 @@ class TestBuildMipmapQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         from ecephys_mipmap_zarr.read import open_mipmap
@@ -900,8 +926,8 @@ class TestBuildMipmapQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True, raw_quantization=rq),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range", raw_quantization=rq),
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -934,8 +960,8 @@ class TestAddPyramidQuantized:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=self._small_chunk_config(), lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=self._small_chunk_config()),
+            encoding=EncodingConfig(pyramids="range"),
         )
 
         pyr_root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -968,7 +994,8 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4),
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -1008,7 +1035,8 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4),
         )
 
         store = open_mipmap(out)
@@ -1040,7 +1068,8 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -1063,7 +1092,8 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4),
         )
 
         # Just verify it builds and reads without error
@@ -1091,7 +1121,8 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=self._small_chunk_config(), lsb_shift_pyramid=4, lsb_shift_raw=0),
+            config=BuildConfig(chunk_config=self._small_chunk_config()),
+            encoding=EncodingConfig(pyramid_shift=4),
         )
 
         pyr_root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -1114,7 +1145,8 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4, clip_outliers=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4, clip_outliers=True),
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
@@ -1135,8 +1167,135 @@ class TestBuildMipmapLsbShift:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4, clip_outliers=False),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4, clip_outliers=False),
         )
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
         assert root["raw"].dtype == np.int16  # kept int16
+
+
+# ---------------------------------------------------------------------------
+# Encoding: combinations, ADC calibration, validation
+# ---------------------------------------------------------------------------
+
+
+class TestEncoding:
+    GAIN = np.array([2.0, 2.5, 3.0, 0.5])
+    OFFSET = np.array([10.0, 0.0, -5.0, 1.0])
+
+    def _cfg(self):
+        return BuildConfig(
+            chunk_config=ChunkConfig(
+                raw_chunk=(4, 1024),
+                raw_shard=(4, 4096),
+                minmax_chunk=(4, 2, 256),
+                minmax_shard=(4, 2, 1024),
+            )
+        )
+
+    def _source(self, n_samples=100_000):
+        rng = np.random.default_rng(7)
+        return rng.integers(-400, 400, size=(n_samples, 4), dtype=np.int16)
+
+    def _build(self, tmp_path, encoding, *, source=None, gains=False, fs=30000.0):
+        source = self._source() if source is None else source
+        out = tmp_path / "enc.zarr"
+        meta = None
+        if gains:
+            meta = {"channel_ids": np.array(list("abcd")), "gain_to_uV": self.GAIN, "offset_to_uV": self.OFFSET}
+        build_mipmap(
+            source,
+            out,
+            sampling_frequency=fs,
+            units="uV",
+            config=self._cfg(),
+            encoding=encoding,
+            source_metadata=meta,
+        )
+        return source, out
+
+    def test_gain_composes_with_range_fit_pyramids(self, tmp_path):
+        from ecephys_mipmap_zarr.read import open_mipmap
+
+        source, out = self._build(tmp_path, EncodingConfig(raw="none", pyramids="range"), gains=True)
+        result = open_mipmap(out).get_window(0, source.shape[0], num_points=100)
+        assert not result.is_raw
+        block0 = source[:32].astype(np.float64)
+        step_uv = 800 / 255 * self.GAIN
+        np.testing.assert_allclose(
+            result.data[:, 0, 0], block0.min(axis=0) * self.GAIN + self.OFFSET, atol=step_uv.max()
+        )
+        np.testing.assert_allclose(
+            result.data[:, 1, 0], block0.max(axis=0) * self.GAIN + self.OFFSET, atol=step_uv.max()
+        )
+
+    def test_gain_composes_with_range_fit_raw(self, tmp_path):
+        from ecephys_mipmap_zarr.read import open_mipmap
+
+        source, out = self._build(tmp_path, EncodingConfig(raw="range", pyramids="none"), gains=True)
+        result = open_mipmap(out).get_window(0, 200, num_points=1000)
+        assert result.is_raw
+        expected = (source[:200].astype(np.float64) * self.GAIN + self.OFFSET).T
+        np.testing.assert_allclose(result.data, expected, atol=0.1)
+
+    def test_shifted_raw_with_range_fit_pyramids(self, tmp_path):
+        from ecephys_mipmap_zarr.read import open_mipmap
+
+        source, out = self._build(tmp_path, EncodingConfig(raw_shift=2, pyramids="range"))
+        root = zarr.open_group(str(out), mode="r", use_consolidated=None)
+        assert root["raw"].dtype == np.int8
+        assert dict(root["raw"].attrs)["lsb_shift"] == 2
+        assert root["minmax/s32"].dtype == np.uint8
+        assert "quantization" in dict(root["minmax/s32"].attrs)
+        raw = open_mipmap(out).get_window(0, 200, num_points=1000)
+        np.testing.assert_allclose(raw.data, source[:200].T, atol=2)
+
+    def test_auto_shift_refuses_below_noise_band(self, tmp_path):
+        with pytest.raises(ValueError, match="Nyquist"):
+            self._build(tmp_path, EncodingConfig(), fs=2500.0)
+
+    @pytest.mark.parametrize(
+        "encoding",
+        [EncodingConfig(raw_shift=1, pyramid_shift=3), EncodingConfig(noise_floor=4.0)],
+    )
+    def test_low_rate_shift_given_bits_or_noise(self, tmp_path, encoding):
+        _, out = self._build(tmp_path, encoding, fs=2500.0)
+        assert dict(zarr.open_group(str(out), mode="r", use_consolidated=None)["raw"].attrs)["lsb_shift"] >= 1
+
+    @pytest.mark.parametrize(
+        ("encoding", "float_source", "match"),
+        [
+            (EncodingConfig(raw="shift"), True, "integer source"),
+            (EncodingConfig(raw="range", raw_shift=2), False, "raw_shift applies only"),
+            (EncodingConfig(raw_shift=2, pyramid_shift=4, noise_floor=4.0), False, "noise_floor"),
+            (EncodingConfig(raw="none", raw_range_dtype="uint8"), False, "range settings for raw"),
+            (EncodingConfig(raw="lossy"), False, "must be"),  # type: ignore[arg-type]
+        ],
+    )
+    def test_rejects_unused_or_unsuitable_settings(self, tmp_path, encoding, float_source, match):
+        source = self._source().astype(np.float32) if float_source else self._source()
+        with pytest.raises(ValueError, match=match):
+            self._build(tmp_path, encoding, source=source)
+
+    def test_add_pyramid_rejects_raw_settings(self, tmp_path):
+        _, raw_store = self._build(tmp_path, LOSSLESS_ENCODING)
+        with pytest.raises(ValueError, match="no raw array"):
+            add_pyramid(raw_store, tmp_path / "pyr.zarr", config=self._cfg(), encoding=EncodingConfig(raw_shift=2))
+
+    def test_add_pyramid_auto_shift_matches_build(self, tmp_path):
+        """A channel-first stored raw gives the same auto shift as the (T, C) source it came from."""
+        source = self._source()
+        built = tmp_path / "built.zarr"
+        build_mipmap(source, built, sampling_frequency=30000.0, units="uV", config=self._cfg())
+        lossless = tmp_path / "lossless.zarr"
+        build_mipmap(
+            source, lossless, sampling_frequency=30000.0, units="uV", config=self._cfg(), encoding=LOSSLESS_ENCODING
+        )
+        pyramid = tmp_path / "pyr.zarr"
+        add_pyramid(lossless, pyramid, config=self._cfg())
+
+        def s32_shift(path):
+            return dict(zarr.open_group(str(path), mode="r", use_consolidated=None)["minmax/s32"].attrs)["lsb_shift"]
+
+        assert s32_shift(pyramid) == s32_shift(built)

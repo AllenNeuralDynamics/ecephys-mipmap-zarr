@@ -18,7 +18,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any, Union
+from typing import Annotated, Any, Literal, Union
 
 import numpy as np
 import tyro
@@ -26,7 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from ecephys_mipmap_zarr.build import ProgressCallback, add_pyramid, build_mipmap
-from ecephys_mipmap_zarr.metadata import BuildConfig, QuantizationConfig
+from ecephys_mipmap_zarr.metadata import BuildConfig, EncodingConfig
 from ecephys_mipmap_zarr.read import open_mipmap
 
 console = Console()
@@ -60,6 +60,17 @@ def _is_zarr_store(path: str) -> bool:
         return True  # Remote URIs are always zarr stores for our purposes
     p = Path(path)
     return p.suffix == ".zarr" or (p / "zarr.json").exists()
+
+
+def _parse_shift(value: int | str) -> Any:
+    """Turn a ``--*-shift`` value into ``"auto"`` or an int; tyro passes digits through as str."""
+    if isinstance(value, str) and value != "auto":
+        try:
+            return int(value)
+        except ValueError:
+            msg = f"shift must be 'auto' or an integer, got {value!r}"
+            raise SystemExit(msg) from None
+    return value
 
 
 def _resolve_prefetch_chunks(value: int, source_path: str) -> int:
@@ -273,22 +284,23 @@ class BuildSettings:
     """Data type (required for .dat)."""
     raw_path: str = "raw"
     """Path to raw array (zarr input only)."""
-    quantize: bool = False
-    """Quantize raw and pyramids (smart: skips raw if already integer)."""
-    quantize_pyramids: bool | None = None
-    """Quantize pyramids to uint8 (overrides --quantize for pyramids)."""
+    raw_encoding: Literal["shift", "range", "none"] | None = None
+    """Raw encoding: shift (drop noise bits, int8 when it fits), range (per-channel uint16) or none.
+    Default: shift for integer sources, range for float."""
+    pyramid_encoding: Literal["shift", "range", "none"] | None = None
+    """Pyramid encoding: shift, range (per-channel uint8) or none. Default as for --raw-encoding."""
     compressor: str = "blosc"
     """Compressor preset: blosc, gzip, zstd."""
     metadata_from: str | None = None
     """Zarr store (local or S3) to copy probe/channel metadata from."""
-    lsb_shift_raw: int | str = "auto"
-    """LSB right-shift for raw data: 'auto' (detect from noise), 0 (lossless), or an integer."""
-    lsb_shift_pyramid: int | str = "auto"
-    """LSB right-shift for pyramids: 'auto' (detect, +2 vs raw), 0 (lossless), or an integer."""
+    raw_shift: int | str = "auto"
+    """Bits the raw shift drops: 'auto' (chosen from the noise floor) or an integer."""
+    pyramid_shift: int | str = "auto"
+    """Bits the pyramid shift drops: 'auto' (2 more than the noise allows for raw) or an integer."""
     noise_floor: float | None = None
-    """Explicit noise floor in ADC RMS units (overrides auto-detection)."""
+    """Noise floor in source units RMS for 'auto' shifts (default: measured at 10-14 kHz)."""
     clip_outliers: bool = True
-    """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
+    """After shifting, clip values outside int8 when under 0.01%% of them, rather than keep int16."""
     prefetch_chunks: int = -1
     """Prefetch N source chunks in background threads (-1=auto: 3 remote / 0 local; 0=disabled)."""
     wavpack_decode_threads: int = 4
@@ -414,15 +426,15 @@ class BuildSettings:
         console.print(f"Building mipmap → {self.output}")
         build_config = BuildConfig(
             compressor=self.compressor,
-            lsb_shift_raw=self.lsb_shift_raw,
-            lsb_shift_pyramid=self.lsb_shift_pyramid,
-            noise_floor=self.noise_floor,
-            clip_outliers=self.clip_outliers,
             prefetch_chunks=prefetch_chunks,
         )
-        quant_config = QuantizationConfig(
-            quantize=self.quantize,
-            quantize_pyramids=self.quantize_pyramids,
+        encoding = EncodingConfig(
+            raw=self.raw_encoding,
+            pyramids=self.pyramid_encoding,
+            raw_shift=_parse_shift(self.raw_shift),
+            pyramid_shift=_parse_shift(self.pyramid_shift),
+            noise_floor=self.noise_floor,
+            clip_outliers=self.clip_outliers,
         )
         with _progress_bar() as progress_fn, _scipy_fft_workers(self.fft_workers):
             build_mipmap(
@@ -432,7 +444,7 @@ class BuildSettings:
                 units=self.units,
                 dtype=dtype,
                 config=build_config,
-                quantization=quant_config,
+                encoding=encoding,
                 metadata_from=None if built_source_metadata is not None else self.metadata_from,
                 source_metadata=built_source_metadata,
                 t_start_offset=float(self.start_seconds),
@@ -455,16 +467,16 @@ class AddPyramidSettings:
     """Physical units."""
     raw_path: str = "raw"
     """Path to raw array in store."""
-    quantize: bool = False
-    """Quantize pyramids to uint8."""
+    pyramid_encoding: Literal["shift", "range", "none"] | None = None
+    """Pyramid encoding: shift, range (per-channel uint8) or none. Default as for --raw-encoding."""
     compressor: str = "blosc"
     """Compressor preset: blosc, gzip, zstd."""
-    lsb_shift_pyramid: int | str = "auto"
-    """LSB right-shift for pyramids: 'auto' (detect, +2 vs raw), 0 (lossless), or an integer."""
+    pyramid_shift: int | str = "auto"
+    """Bits the pyramid shift drops: 'auto' (2 more than the noise allows for raw) or an integer."""
     noise_floor: float | None = None
-    """Explicit noise floor in ADC RMS units (overrides auto-detection)."""
+    """Noise floor in source units RMS for 'auto' shifts (default: measured at 10-14 kHz)."""
     clip_outliers: bool = True
-    """Clip rare outliers (<0.01%%) to fit int8 when LSB-shifting."""
+    """After shifting, clip values outside int8 when under 0.01%% of them, rather than keep int16."""
     prefetch_chunks: int = -1
     """Prefetch N source chunks in background threads (-1=auto: 3 remote / 0 local; 0=disabled)."""
 
@@ -475,13 +487,13 @@ class AddPyramidSettings:
         console.print(f"Building pyramids → {self.output}")
         build_config = BuildConfig(
             compressor=self.compressor,
-            lsb_shift_pyramid=self.lsb_shift_pyramid,
-            noise_floor=self.noise_floor,
-            clip_outliers=self.clip_outliers,
             prefetch_chunks=prefetch_chunks,
         )
-        quant_config = QuantizationConfig(
-            quantize=self.quantize,
+        encoding = EncodingConfig(
+            pyramids=self.pyramid_encoding,
+            pyramid_shift=_parse_shift(self.pyramid_shift),
+            noise_floor=self.noise_floor,
+            clip_outliers=self.clip_outliers,
         )
         with _progress_bar() as progress_fn:
             add_pyramid(
@@ -491,7 +503,7 @@ class AddPyramidSettings:
                 units=self.units,
                 raw_path=self.raw_path,
                 config=build_config,
-                quantization=quant_config,
+                encoding=encoding,
                 progress=progress_fn,
             )
         console.print("[green]Done.[/green]")

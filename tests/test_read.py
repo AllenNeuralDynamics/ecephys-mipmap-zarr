@@ -7,7 +7,14 @@ import pytest
 import zarr
 
 from ecephys_mipmap_zarr.build import add_pyramid, build_mipmap
-from ecephys_mipmap_zarr.metadata import BuildConfig, ChunkConfig, MipmapAttrs, QuantizationConfig, compute_strides
+from ecephys_mipmap_zarr.metadata import (
+    LOSSLESS_ENCODING,
+    BuildConfig,
+    ChunkConfig,
+    EncodingConfig,
+    MipmapAttrs,
+    compute_strides,
+)
 from ecephys_mipmap_zarr.read import MipmapStore, ReadPlan, WindowResult, open_mipmap
 
 SMALL_CFG = ChunkConfig(
@@ -34,7 +41,8 @@ def colocated_store(tmp_path, source_data):
         out,
         sampling_frequency=30000.0,
         units="uV",
-        config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
+        config=BuildConfig(chunk_config=SMALL_CFG),
+        encoding=LOSSLESS_ENCODING,
     )
     return out
 
@@ -52,7 +60,8 @@ def pyramid_only_store(tmp_path, source_data):
         pyr_path,
         sampling_frequency=30000.0,
         units="uV",
-        config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
+        config=BuildConfig(chunk_config=SMALL_CFG),
+        encoding=LOSSLESS_ENCODING,
     )
     return pyr_path, raw_path
 
@@ -271,7 +280,8 @@ class TestGetWindowPyramidOnly:
             pyr_path,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=SMALL_CFG),
+            encoding=LOSSLESS_ENCODING,
         )
 
         # Open pyramid store but construct MipmapStore without raw_group
@@ -314,8 +324,8 @@ class TestGetWindowQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         store = open_mipmap(out)
@@ -336,8 +346,8 @@ class TestGetWindowQuantized:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         store = open_mipmap(out)
@@ -497,7 +507,8 @@ class TestPlanWindow:
             pyr_path,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=SMALL_CFG),
+            encoding=LOSSLESS_ENCODING,
         )
 
         pyr_root = zarr.open_group(str(pyr_path), mode="r", use_consolidated=None)
@@ -615,7 +626,8 @@ class TestDequantize:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4),
         )
 
         store = open_mipmap(out)
@@ -642,7 +654,8 @@ class TestDequantize:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4),
         )
 
         store = open_mipmap(out)
@@ -668,8 +681,8 @@ class TestDequantize:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         store = open_mipmap(out)
@@ -701,8 +714,8 @@ class TestDequantize:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         store = open_mipmap(out)
@@ -755,7 +768,8 @@ class TestGetWindowDequantize:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=2, lsb_shift_pyramid=4),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw_shift=2, pyramid_shift=4),
         )
 
         store = open_mipmap(out)
@@ -783,8 +797,8 @@ class TestGetWindowDequantize:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         store = open_mipmap(out)
@@ -891,7 +905,8 @@ class TestIsRemote:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=SMALL_CFG, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=SMALL_CFG),
+            encoding=LOSSLESS_ENCODING,
         )
         store = open_mipmap(out)
         assert store.is_remote is False

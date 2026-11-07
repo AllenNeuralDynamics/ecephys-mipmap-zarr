@@ -269,43 +269,35 @@ def _read_gain_offset(src: zarr.Group) -> tuple[np.ndarray, np.ndarray] | None:
     return gain, offset
 
 
-def _write_raw_quantization(
-    dst: zarr.Group,
-    gain: np.ndarray,
-    offset: np.ndarray,
-    lsb_shift: int = 0,
-) -> None:
-    """Store gain/offset as :class:`RawQuantization` on the ``/raw`` array.
+def _pop_encoding(array: zarr.Array) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
+    """Return *array*'s attrs without its shift attrs, the shift in bits, and its range fit if any."""
+    attrs: dict[str, Any] = dict(array.attrs)
+    shift = int(attrs.pop("lsb_shift", 0))
+    attrs.pop("original_dtype", None)
+    return attrs, shift, attrs.get("quantization")
 
-    When *lsb_shift* > 0, the gain is multiplied by ``2**lsb_shift`` so
-    dequantization handles both bit-shift reconstruction and unit
-    conversion in a single step, and the standalone ``lsb_shift`` attr
-    is removed.
-    """
-    effective_gain = gain * (1 << lsb_shift) if lsb_shift > 0 else gain
 
+def _write_raw_quantization(dst: zarr.Group, gain: np.ndarray, offset: np.ndarray) -> None:
+    """Store the ADC calibration on ``/raw``, composed with its encoding, so the reader decodes to uV."""
     try:
         raw_array: zarr.Array = dst["raw"]  # type: ignore[assignment]
-        raw_dtype = str(raw_array.dtype)
     except KeyError:
         return  # No /raw in destination (pyramid-only store)
 
-    rq = RawQuantization(
-        offset=offset.tolist(),
-        scale=effective_gain.tolist(),
-        source_dtype="float32",
-        quantized_dtype=raw_dtype,
-    )
-
-    if lsb_shift > 0:
-        existing = dict(raw_array.attrs)
-        existing.pop("lsb_shift", None)
-        existing.pop("original_dtype", None)
-        existing["quantization"] = rq.to_dict()
-        raw_array.attrs.clear()
-        raw_array.attrs.update(existing)
+    attrs, shift, range_fit = _pop_encoding(raw_array)
+    if range_fit is not None:  # codes -> source units -> uV
+        scale = np.asarray(range_fit["scale"]) * gain
+        uv_offset = np.asarray(range_fit["offset"]) * gain + offset
     else:
-        raw_array.attrs.update({"quantization": rq.to_dict()})
+        scale, uv_offset = gain * (1 << shift), offset
+    attrs["quantization"] = RawQuantization(
+        offset=uv_offset.tolist(),
+        scale=scale.tolist(),
+        source_dtype="float32",
+        quantized_dtype=str(raw_array.dtype),
+    ).to_dict()
+    raw_array.attrs.clear()
+    raw_array.attrs.update(attrs)
 
 
 def _write_pyramid_quantization(
@@ -313,63 +305,50 @@ def _write_pyramid_quantization(
     gain: np.ndarray,
     offset: np.ndarray,
     strides: list[int],
-    lsb_shift: int = 0,
 ) -> None:
-    """Store gain/offset as :class:`LevelQuantization` on pyramid arrays."""
-    effective_gain = gain * (1 << lsb_shift) if lsb_shift > 0 else gain
-
+    """Store the ADC calibration on each pyramid level, composed with its encoding."""
     for stride in strides:
-        path = f"minmax/s{stride}"
         try:
-            mm_array: zarr.Array = dst[path]  # type: ignore[assignment]
+            mm_array: zarr.Array = dst[f"minmax/s{stride}"]  # type: ignore[assignment]
         except KeyError:
             continue
 
-        lq = LevelQuantization(
-            min_offset=offset.tolist(),
-            max_offset=offset.tolist(),
-            scale=effective_gain.tolist(),
+        attrs, shift, range_fit = _pop_encoding(mm_array)
+        if range_fit is not None:
+            scale = np.asarray(range_fit["scale"]) * gain
+            min_offset = np.asarray(range_fit["min_offset"]) * gain + offset
+            max_offset = np.asarray(range_fit["max_offset"]) * gain + offset
+        else:
+            scale, min_offset, max_offset = gain * (1 << shift), offset, offset
+        attrs["quantization"] = LevelQuantization(
+            min_offset=min_offset.tolist(),
+            max_offset=max_offset.tolist(),
+            scale=scale.tolist(),
             source_dtype="float32",
             quantized_dtype=str(mm_array.dtype),
-        )
-
-        existing = dict(mm_array.attrs)
-        existing.pop("lsb_shift", None)
-        existing.pop("original_dtype", None)
-        existing["quantization"] = lq.to_dict()
+        ).to_dict()
         mm_array.attrs.clear()
-        mm_array.attrs.update(existing)
+        mm_array.attrs.update(attrs)
 
 
-def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group, lsb_shift: int = 0) -> None:
-    """Store ADC gain/offset as RawQuantization if gain_to_uV is available in *src*."""
+def _apply_adc_quantization(src: zarr.Group, dst: zarr.Group) -> None:
+    """Store ADC gain/offset on ``/raw`` if gain_to_uV is available in *src*."""
     pair = _read_gain_offset(src)
-    if pair is None:
-        return
-    gain, offset = pair
-    _write_raw_quantization(dst, gain, offset, lsb_shift=lsb_shift)
+    if pair is not None:
+        _write_raw_quantization(dst, *pair)
 
 
-def _apply_adc_pyramid_quantization(
-    src: zarr.Group,
-    dst: zarr.Group,
-    strides: list[int],
-    lsb_shift: int = 0,
-) -> None:
-    """Store ADC gain/offset as LevelQuantization on pyramid arrays if available in *src*."""
+def _apply_adc_pyramid_quantization(src: zarr.Group, dst: zarr.Group, strides: list[int]) -> None:
+    """Store ADC gain/offset on pyramid arrays if gain_to_uV is available in *src*."""
     pair = _read_gain_offset(src)
-    if pair is None:
-        return
-    gain, offset = pair
-    _write_pyramid_quantization(dst, gain, offset, strides=strides, lsb_shift=lsb_shift)
+    if pair is not None:
+        _write_pyramid_quantization(dst, *pair, strides=strides)
 
 
 def _write_source_metadata_dict(
     dst: zarr.Group,
     metadata: dict[str, Any],
     strides: list[int],
-    raw_shift: int = 0,
-    pyr_shift: int = 0,
 ) -> None:
     """Write source metadata (channel_ids, location, gain/offset) from an in-memory dict.
 
@@ -395,5 +374,5 @@ def _write_source_metadata_dict(
     if gain is not None and offset is not None:
         gain_arr = np.asarray(gain)
         offset_arr = np.asarray(offset)
-        _write_raw_quantization(dst, gain_arr, offset_arr, lsb_shift=raw_shift)
-        _write_pyramid_quantization(dst, gain_arr, offset_arr, strides=strides, lsb_shift=pyr_shift)
+        _write_raw_quantization(dst, gain_arr, offset_arr)
+        _write_pyramid_quantization(dst, gain_arr, offset_arr, strides=strides)

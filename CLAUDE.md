@@ -51,15 +51,14 @@ Key details:
 - Raw dtype: int16 (typical for acquisition hardware) or float32 (filtered/processed data)
 - Pyramid dtype: defaults to raw dtype (lossless — min/max of intN is intN)
 - Optional per-level quantization (`LevelQuantization` in level attrs): separate offsets for min/max axes (they cluster in different ranges) with shared scale. Allows e.g. float32 raw → int16 or int8 pyramids for smaller transfer size. Dequantize: `value = quantized * scale + offset`
-- **Quantization support** (`quantize=True` in builder): float32 → uint16 raw + uint8 pyramids. Per-channel offset/scale, auto-computed or user-provided. `RawQuantization` and `LevelQuantization` stored in array attrs. Reader dequantizes transparently.
-- Pyramid quantization is shared across all levels (computed from s32, cascaded directly on uint8 — order-preserving)
-- **Separate flags**: `quantize_raw` and `quantize_pyramids` for independent control. Smart detection: skips raw requantization when source is already integer.
-- **ADC gain/offset**: when `metadata_from` points to an SI zarr with `gain_to_uV`/`offset_to_uV`, stores as `RawQuantization` so the reader dequantizes int16 ADC values to float32 µV transparently. When combined with LSB shift, the gain is multiplied by `2**lsb_shift` so dequantization handles both reconstruction and unit conversion in a single step.
-- **LSB-shift compression** (default, auto-detected): right-shifts int16 ADC values to drop noise LSBs, stores as int8 when range fits. `lsb_shift` stored in array attrs. Reader reconstructs: `stored.astype(int16) << lsb_shift`. Auto-detects optimal shift from noise floor (10-14 kHz HF band, median across channels). Pyramids get +2 extra shift for display quality.
+- **Encoding per array** (`EncodingConfig`, CLI `--raw-encoding` / `--pyramid-encoding`): raw and pyramids each pick `shift`, `range` or `none`, in any combination. Default: `shift` for integer sources, `range` for float. A setting the chosen encodings don't use is an error, not ignored.
+- **Shift** (`shift`): right-shifts integer values to drop noise LSBs, stores as int8 when the range fits (`clip_outliers` clips under 0.01% to make it fit). `lsb_shift` stored in array attrs. Reader reconstructs: `stored.astype(int16) << lsb_shift`. `"auto"` picks the shift from the noise floor (10-14 kHz band, median across channels; refuses below 28 kHz sampling unless given `noise_floor`). Pyramids get +2 extra shift for display quality, independent of raw's setting.
+- **Range fit** (`range`): per-channel offset/scale onto uint16 raw / uint8 pyramids, from the build's extremes or user-provided `RawQuantization` / `LevelQuantization`, stored in array attrs. Pyramid parameters are shared across levels (computed from s32, cascaded on codes — order-preserving).
+- **ADC gain/offset**: when `metadata_from` / `source_metadata` carries `gain_to_uV`/`offset_to_uV`, it is composed with each array's encoding into one `quantization` attr (shift: scale `gain * 2**lsb_shift`; range fit: codes → source units → µV), so the reader decodes straight to float32 µV.
 
 ### Bit depth analysis (Neuropixels 2.0, 12-bit ADC)
 
-Benchmarked on real Neuropixels 2.0 data (12-bit ADC, gain=2.34 µV/ADC). Two datasets: preprocessed (HP 300Hz + CMR, 373 channels, `.cbin`) and raw unfiltered (384 channels, S3 WavPack zarr).
+Benchmarked on real Neuropixels 2.0 data (12-bit ADC). Analysis is in ADC counts; the µV figures below are examples at 2.925 µV/count, and the actual gain is per recording, read from `gain_to_uV`. Two datasets: preprocessed (HP 300Hz + CMR, 373 channels, `.cbin`) and raw unfiltered (384 channels, S3 WavPack zarr).
 
 **Noise analysis:**
 - **Analog noise floor**: ~4 ADC units RMS (measured from 10-14 kHz spectrum where spike power is negligible — SUA templates have >99% energy below 5 kHz, validated against 105 decoder-labeled SUA units)
@@ -69,7 +68,7 @@ Benchmarked on real Neuropixels 2.0 data (12-bit ADC, gain=2.34 µV/ADC). Two da
 
 **Optimal storage: drop 2 LSBs, store as int8**
 
-Right-shift by 2 (`sample >> 2`), cast to int8. Step=4 ADC, quant noise=1.15 ADC, **3.5x below analog noise** (engineering standard: ≥2x). Max error = 3 ADC = 7 µV, below 1σ of noise. Reconstruction: `stored.astype(int16) << 2`.
+Right-shift by 2 (`sample >> 2`), cast to int8. Step=4 ADC, quant noise=1.15 ADC, **3.5x below analog noise** (engineering standard: ≥2x). Max error = 2 ADC (half a step, with rounding) ≈ 6 µV, below 1σ of noise. Reconstruction: `stored.astype(int16) << 2`.
 
 | Data | After >>2 | Unique vals/ch | Best codec | Compressed | Ratio vs int16 |
 |---|---|---|---|---|---|
@@ -96,7 +95,7 @@ Pyramid range: [-314, 209], entropy 5.54 bits/sample. Note: >>1 doesn't fit int8
 | Analysis quality | >>2 | 4 ADC | **8.1 MB** (noshuffle) | 8.4 MB (bitshuffle) |
 | Display quality | >>4 | 16 ADC | **2.4 MB** (bitshuffle) | 2.5 MB (bitshuffle) |
 
-Display quality (>>4, step=16, max error=35 µV) is appropriate for pyramids — they exist solely for envelope rendering at screen resolution where sub-pixel differences are invisible.
+Display quality (>>4, step=16, max error=8 ADC ≈ 23 µV) is appropriate for pyramids — they exist solely for envelope rendering at screen resolution where sub-pixel differences are invisible.
 
 **Unified approach: `lsb_shift` parameter.** Right-shift original ADC values, cast to int8, store with `lsb_shift` metadata. Reader reconstructs: `stored.astype(int16) << lsb_shift`. No per-channel offset/scale needed.
 
@@ -195,7 +194,7 @@ A high-confidence single unit has: KS=good, decoder=sua, default_qc=True.
 
 ```
 src/ecephys_mipmap_zarr/
-    metadata.py   # schema, constants, config dataclasses (BuildConfig, QuantizationConfig), pure math
+    metadata.py   # schema, constants, config dataclasses (BuildConfig, EncodingConfig), pure math
     _store.py     # shared store utilities: _open_store, _find_raw_array, metadata copying
     _engine.py    # write engine: minmax computation, cascade, zarr array factory, LSB shift
     build.py      # public API: build_mipmap, add_pyramid, ensure_pyramid (orchestration only)

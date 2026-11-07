@@ -9,7 +9,14 @@ import zarr
 from ecephys_mipmap_zarr import cli as cli_module
 from ecephys_mipmap_zarr.build import build_mipmap
 from ecephys_mipmap_zarr.cli import AddPyramidSettings, BuildSettings, InfoSettings, ViewSettings
-from ecephys_mipmap_zarr.metadata import BuildConfig, ChunkConfig, MipmapAttrs, QuantizationConfig, compute_strides
+from ecephys_mipmap_zarr.metadata import (
+    LOSSLESS_ENCODING,
+    BuildConfig,
+    ChunkConfig,
+    EncodingConfig,
+    MipmapAttrs,
+    compute_strides,
+)
 
 SMALL_CFG = ChunkConfig(
     raw_chunk=(4, 1024),
@@ -75,7 +82,6 @@ class TestBuildFromBinary:
             n_samples=100_000,
             n_channels=4,
             dtype="float32",
-            quantize=True,
         )
         settings.cli_cmd()
 
@@ -156,7 +162,8 @@ class TestInfoCLI:
             out,
             sampling_frequency=30000.0,
             units="uV",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=LOSSLESS_ENCODING,
         )
 
         settings = InfoSettings(store_path=str(out))
@@ -176,8 +183,8 @@ class TestInfoCLI:
             sampling_frequency=30000.0,
             units="uV",
             dtype="float32",
-            config=BuildConfig(chunk_config=cfg, lsb_shift_raw=0, lsb_shift_pyramid=0),
-            quantization=QuantizationConfig(quantize=True),
+            config=BuildConfig(chunk_config=cfg),
+            encoding=EncodingConfig(raw="range", pyramids="range"),
         )
 
         settings = InfoSettings(store_path=str(out))
@@ -199,7 +206,7 @@ class TestCLIParsing:
 
         assert exc_info.value.code == 2
 
-    def test_build_accepts_bare_quantize_flag(self, monkeypatch: pytest.MonkeyPatch):
+    def test_build_accepts_encoding_flags(self, monkeypatch: pytest.MonkeyPatch):
         parsed = _parse_cli(
             monkeypatch,
             [
@@ -215,7 +222,10 @@ class TestCLIParsing:
                 "10",
                 "--n-channels",
                 "2",
-                "--quantize",
+                "--raw-encoding",
+                "none",
+                "--pyramid-shift",
+                "5",
             ],
         )
 
@@ -234,12 +244,12 @@ class TestCLIParsing:
             "n_channels": 2,
             "dtype": "int16",
             "raw_path": "raw",
-            "quantize": True,
-            "quantize_pyramids": None,
+            "raw_encoding": "none",
+            "pyramid_encoding": None,
             "compressor": "blosc",
             "metadata_from": None,
-            "lsb_shift_raw": "auto",
-            "lsb_shift_pyramid": "auto",
+            "raw_shift": "auto",
+            "pyramid_shift": 5,
             "noise_floor": None,
             "clip_outliers": True,
             "prefetch_chunks": -1,

@@ -101,10 +101,10 @@ ecephys-mipmap build --input recording.cbin --output mipmap.zarr
 ecephys-mipmap build --input recording.dat --output mipmap.zarr \
     --sampling-frequency 30000 --n-samples 900000 --n-channels 384
 
-# Build with quantization (float32 → uint16 raw + uint8 pyramids)
+# Choose each array's encoding: shift (default for integer data), range or none
 ecephys-mipmap build --input recording.dat --output mipmap.zarr \
     --sampling-frequency 30000 --n-samples 900000 --n-channels 384 \
-    --dtype float32 --quantize
+    --raw-encoding none --pyramid-encoding range
 
 # Copy probe metadata from an S3 zarr
 ecephys-mipmap build --input recording.cbin --output mipmap.zarr \
@@ -138,7 +138,8 @@ ecephys-mipmap view mipmap.zarr
 - Pyramid levels use base stride 32, factor 8x per level
 - Levels added until the coarsest has < 1024 blocks
 - Zarr v3 with sharding for S3-friendly access
-- Optional quantization: raw → uint16, pyramids → uint8 with per-channel offset/scale
+- Per-array encoding: `shift` drops bits below the noise floor (int8 when it fits; default for integer data),
+  `range` maps each channel onto uint16 raw / uint8 pyramids (default for float data), `none` stores values as-is
 - Blosc(zstd) compression by default, configurable via `compressor` parameter
 
 ## Development

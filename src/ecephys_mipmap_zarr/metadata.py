@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import asdict, dataclass, replace
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
@@ -25,18 +25,22 @@ __all__ = [
     "DEFAULT_CHUNK_CONFIG",
     "DEFAULT_CHANNEL_CHUNK",
     "DEFAULT_DTYPE",
-    "DEFAULT_QUANTIZATION_CONFIG",
+    "DEFAULT_ENCODING_CONFIG",
+    "Encoding",
+    "EncodingConfig",
+    "LOSSLESS_ENCODING",
+    "HF_NOISE_BAND_HZ",
     "LevelQuantization",
     "MIN_TOP_BLOCKS",
     "MINMAX_PREFIX",
     "MipmapAttrs",
-    "QuantizationConfig",
     "RAW_PATH",
     "RawQuantization",
     "STRIDE_FACTOR",
     "compute_quantization_params",
     "compute_strides",
     "compute_optimal_lsb_shift",
+    "lsb_shift_for_noise",
     "dequantize_array",
     "estimate_hf_noise",
     "minmax_path",
@@ -167,16 +171,6 @@ class BuildConfig:
         Compressor preset or codec instance.
     consolidate_metadata : bool
         Write consolidated metadata.
-    lsb_shift_raw : int or str
-        Right-shift for raw data: ``0`` (lossless), ``"auto"``
-        (noise-based), or a positive integer.
-    lsb_shift_pyramid : int or str
-        Right-shift for pyramid data.
-    noise_floor : float or None
-        Explicit noise floor override (ADC RMS).
-    clip_outliers : bool
-        When LSB-shifting, clip rare outliers (<0.01% of samples) to fit
-        int8 range. Disabled keeps int16 when any value exceeds [-128, 127].
     prefetch_chunks : int
         Number of source chunks to prefetch in background threads.
         ``0`` (default) disables prefetch. Set to 2-3 for S3 or WavPack
@@ -196,10 +190,6 @@ class BuildConfig:
     min_top_blocks: int = MIN_TOP_BLOCKS
     compressor: str | Any = "blosc"  # str | BytesBytesCodec at runtime
     consolidate_metadata: bool = True
-    lsb_shift_raw: int | str = "auto"
-    lsb_shift_pyramid: int | str = "auto"
-    noise_floor: float | None = None
-    clip_outliers: bool = True
     prefetch_chunks: int = 0
     source_retries: int = 5
 
@@ -208,40 +198,64 @@ DEFAULT_BUILD_CONFIG: BuildConfig = BuildConfig()
 """Module-level default build configuration."""
 
 
+Encoding = Literal["shift", "range", "none"]
+"""How an array's values are stored.
+
+- ``"shift"``: round to a step of ``2**bits`` and store signed, int8 when the
+  range fits. Integer sources only.
+- ``"range"``: map each channel's min..max linearly onto an unsigned dtype.
+- ``"none"``: store the source values unchanged.
+"""
+
+
 @dataclass(frozen=True, slots=True)
-class QuantizationConfig:
-    """Configuration for data quantization.
+class EncodingConfig:
+    """How :func:`~ecephys_mipmap_zarr.build.build_mipmap` encodes raw and pyramids.
+
+    Each array picks its encoding independently. A setting that the chosen
+    encodings would not use is an error rather than ignored.
 
     Parameters
     ----------
-    quantize : bool
-        Enable quantization (float32 -> uint16 raw + uint8 pyramids).
-    quantize_raw : bool or None
-        Override quantize for raw data only.
-    quantize_pyramids : bool or None
-        Override quantize for pyramids only.
-    raw_quantized_dtype : str
-        Target dtype for quantized raw data.
-    pyramid_quantized_dtype : str
-        Target dtype for quantized pyramid data.
+    raw, pyramids : {"shift", "range", "none"} or None
+        Encoding per array. ``None`` picks ``"shift"`` for integer sources and
+        ``"range"`` for float ones.
+    raw_shift, pyramid_shift : int or "auto"
+        Bits dropped by ``"shift"``. ``"auto"`` takes the largest step whose
+        rounding noise stays below half the noise floor; pyramids, which are
+        only drawn, get 2 bits more than that.
+    noise_floor : float or None
+        Noise floor in source units RMS for ``"auto"``. ``None`` measures it in
+        the 10-14 kHz band, which needs a sampling rate above 28 kHz.
+    clip_outliers : bool
+        After shifting, clip values outside int8 when they are under 0.01% of
+        the array, rather than keeping int16.
+    raw_range_dtype, pyramid_range_dtype : str
+        Unsigned dtype for ``"range"``.
     raw_quantization : RawQuantization or None
-        User-provided raw quantization params.
+        Fixed ``"range"`` parameters for raw instead of the source's extremes.
     level_quantization : LevelQuantization or None
-        User-provided level quantization params.
+        Fixed ``"range"`` parameters for the pyramids.
     """
 
-    quantize: bool = False
-    quantize_raw: bool | None = None
-    quantize_pyramids: bool | None = None
-    raw_quantized_dtype: str = "uint16"
-    pyramid_quantized_dtype: str = "uint8"
-    # Forward references resolved after RawQuantization/LevelQuantization are defined
+    raw: Encoding | None = None
+    pyramids: Encoding | None = None
+    raw_shift: int | Literal["auto"] = "auto"
+    pyramid_shift: int | Literal["auto"] = "auto"
+    noise_floor: float | None = None
+    clip_outliers: bool = True
+    raw_range_dtype: str = "uint16"
+    pyramid_range_dtype: str = "uint8"
+    # RawQuantization / LevelQuantization, defined below
     raw_quantization: Any = None
     level_quantization: Any = None
 
 
-DEFAULT_QUANTIZATION_CONFIG: QuantizationConfig = QuantizationConfig()
-"""Module-level default quantization configuration."""
+DEFAULT_ENCODING_CONFIG: EncodingConfig = EncodingConfig()
+"""Module-level default encoding: shift for integer sources, range for float."""
+
+LOSSLESS_ENCODING: EncodingConfig = EncodingConfig(raw="none", pyramids="none")
+"""Store raw and pyramids with the source's values unchanged."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,6 +761,10 @@ def dequantize_array(
     return result
 
 
+HF_NOISE_BAND_HZ: tuple[float, float] = (10_000.0, 14_000.0)
+"""Band where :func:`estimate_hf_noise` measures noise: above spike power, below 30 kHz Nyquist."""
+
+
 def estimate_hf_noise(data: npt.NDArray[Any], fs: float = 30000.0) -> float:
     """Estimate the analog noise floor from the high-frequency spectrum.
 
@@ -777,7 +795,7 @@ def estimate_hf_noise(data: npt.NDArray[Any], fs: float = 30000.0) -> float:
     """
     n_channels, n_samples = data.shape
     freqs = np.fft.rfftfreq(n_samples, 1.0 / fs)
-    hf_mask = (freqs >= 10000) & (freqs < 14000)
+    hf_mask = (freqs >= HF_NOISE_BAND_HZ[0]) & (freqs < HF_NOISE_BAND_HZ[1])
 
     if not np.any(hf_mask):
         return 0.0  # Not enough frequency resolution
@@ -825,7 +843,24 @@ def compute_optimal_lsb_shift(
     """
     if noise_floor is None:
         noise_floor = estimate_hf_noise(data, fs)
+    return lsb_shift_for_noise(noise_floor, safety_factor)
 
+
+def lsb_shift_for_noise(noise_floor: float, safety_factor: float = 2.0) -> int:
+    """Largest right-shift whose rounding noise stays below ``noise_floor / safety_factor``.
+
+    Parameters
+    ----------
+    noise_floor : float
+        Noise RMS, in the units being shifted.
+    safety_factor : float, optional
+        Default 2.0 (< 0.5 dB added noise).
+
+    Returns
+    -------
+    int
+        Bits to shift off; 0 when even one bit would be too coarse.
+    """
     if noise_floor <= 0:
         return 0
 

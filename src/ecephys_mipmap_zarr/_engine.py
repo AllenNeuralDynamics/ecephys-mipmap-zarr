@@ -21,10 +21,16 @@ from zarr.codecs import BloscCodec, GzipCodec, ZstdCodec
 from zarr.codecs.blosc import BloscCname, BloscShuffle
 
 from ecephys_mipmap_zarr.metadata import (
+    HF_NOISE_BAND_HZ,
     ChunkConfig,
+    Encoding,
+    EncodingConfig,
+    LevelQuantization,
     RawQuantization,
     compute_entropy,
-    compute_optimal_lsb_shift,
+    compute_quantization_params,
+    estimate_hf_noise,
+    lsb_shift_for_noise,
     minmax_path,
     n_blocks,
     quantize_array,
@@ -35,45 +41,142 @@ __all__: list[str] = []  # private module
 log = logging.getLogger(__name__)
 
 
-def _resolve_lsb_shift(
-    shift: int | str,
+# Samples read from the start of the source to estimate noise and entropy.
+_SAMPLE_SAMPLES = 30_000
+# Largest fraction of an array clip_outliers will clip to fit int8.
+_CLIP_THRESHOLD = 0.0001
+# "auto" pyramid shift over the raw one: pyramids are only drawn.
+_PYRAMID_DISPLAY_BITS = 2
+
+
+def _read_channels_first(source: Any, t0: int, t1: int) -> npt.NDArray[Any]:
+    """Read samples ``[t0, t1)`` of a ``(T, C)`` source as ``(C, T)``."""
+    read_channels_first = getattr(source, "read_channels_first", None)
+    if read_channels_first is not None:
+        return np.asarray(read_channels_first(t0, t1))
+    return np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)
+
+
+class _StoredRawSource:
+    """A stored raw array, ``(T, C)`` or ``(C, T)``, presented as a ``(T, C)`` source."""
+
+    def __init__(self, array: zarr.Array) -> None:
+        self._array = array
+        # More samples than channels identifies SpikeInterface's (T, C) layout.
+        self._time_first = array.shape[0] > array.shape[1]
+        n_samples, n_channels = array.shape if self._time_first else array.shape[::-1]
+        self.shape = (n_samples, n_channels)
+        self.dtype = array.dtype
+
+    def read_channels_first(self, t0: int, t1: int) -> npt.NDArray[Any]:
+        if self._time_first:
+            return np.ascontiguousarray(np.asarray(self._array[t0:t1, :]).T)
+        return np.asarray(self._array[:, t0:t1])
+
+
+@dataclass(frozen=True)
+class _ResolvedEncoding:
+    """Concrete encodings for one build, with shifts resolved to bit counts."""
+
+    raw: Encoding
+    pyramids: Encoding
+    raw_shift: int = 0
+    pyramid_shift: int = 0
+
+
+def _resolve_encoding(
+    encoding: EncodingConfig,
+    *,
     source: Any,
-    n_samples: int,
-    noise_floor: float | None,
-    extra_shift: int = 0,
-) -> int:
-    """Resolve an LSB shift parameter to a concrete integer.
+    source_dtype: str,
+    sampling_frequency: float,
+    writes_raw: bool = True,
+) -> _ResolvedEncoding:
+    """Pick each array's encoding and resolve ``"auto"`` shifts.
 
-    Parameters
-    ----------
-    shift : int or str
-        ``0`` for lossless, a positive ``int`` for manual shift, or
-        ``"auto"`` for noise-based auto-detection.
-    source : array-like
-        Source data (T, C) for noise estimation.
-    n_samples : int
-        Total samples in the source.
-    noise_floor : float or None
-        Explicit noise floor override.
-    extra_shift : int, optional
-        Additional shift for display-quality pyramids.
-
-    Returns
-    -------
-    int
-        Resolved shift value (0 = no shift).
+    Raises
+    ------
+    ValueError
+        If a setting would go unused, ``"shift"`` is asked of a float source,
+        or an ``"auto"`` shift needs a noise estimate the sampling rate can't give.
     """
-    if isinstance(shift, int):
-        return shift
-    if shift != "auto":
-        msg = f"lsb_shift must be int, 'auto', or 0. Got {shift!r}"
+    is_integer = np.issubdtype(np.dtype(source_dtype), np.integer)
+    default: Encoding = "shift" if is_integer else "range"
+    defaults = EncodingConfig()
+
+    if not writes_raw:
+        raw_settings = ("raw", "raw_shift", "raw_range_dtype", "raw_quantization")
+        # raw="none" agrees with writing no raw, so LOSSLESS_ENCODING suits add_pyramid too.
+        set_raw = [
+            name
+            for name in raw_settings
+            if getattr(encoding, name) != getattr(defaults, name) and not (name == "raw" and encoding.raw == "none")
+        ]
+        if set_raw:
+            msg = f"no raw array is written, so {', '.join(set_raw)} would be unused"
+            raise ValueError(msg)
+
+    raw: Encoding = (encoding.raw or default) if writes_raw else "none"
+    pyramids: Encoding = encoding.pyramids or default
+
+    for name, kind, shift, range_dtype, params, default_dtype in (
+        ("raw", raw, encoding.raw_shift, encoding.raw_range_dtype, encoding.raw_quantization, "uint16"),
+        (
+            "pyramids",
+            pyramids,
+            encoding.pyramid_shift,
+            encoding.pyramid_range_dtype,
+            encoding.level_quantization,
+            "uint8",
+        ),
+    ):
+        if kind not in ("shift", "range", "none"):
+            msg = f"{name} encoding must be 'shift', 'range' or 'none', got {kind!r}"
+            raise ValueError(msg)
+        if kind == "shift" and not is_integer:
+            msg = f"{name}='shift' needs an integer source; use 'range' or 'none' for {source_dtype}"
+            raise ValueError(msg)
+        shift_name = "raw_shift" if name == "raw" else "pyramid_shift"
+        if kind != "shift" and shift != "auto":
+            msg = f"{shift_name} applies only to {name}='shift', not {kind!r}"
+            raise ValueError(msg)
+        if shift != "auto" and (not isinstance(shift, int) or shift < 0):
+            msg = f"{shift_name} must be 'auto' or a non-negative int, got {shift!r}"
+            raise ValueError(msg)
+        if kind != "range" and (params is not None or range_dtype != default_dtype):
+            msg = f"range settings for {name} apply only to {name}='range', not {kind!r}"
+            raise ValueError(msg)
+
+    raw_auto = raw == "shift" and encoding.raw_shift == "auto"
+    pyramid_auto = pyramids == "shift" and encoding.pyramid_shift == "auto"
+    if encoding.noise_floor is not None and not (raw_auto or pyramid_auto):
+        msg = "noise_floor is used only by an 'auto' shift"
         raise ValueError(msg)
 
-    # Auto-detect: read first 30K samples
-    n_sample = min(30_000, n_samples)
-    sample = np.ascontiguousarray(np.asarray(source[0:n_sample, :]).T)  # (C, T)
-    auto_shift = compute_optimal_lsb_shift(sample, noise_floor=noise_floor)
-    return auto_shift + extra_shift
+    noise_floor = encoding.noise_floor
+    if (raw_auto or pyramid_auto) and noise_floor is None:
+        band_top = HF_NOISE_BAND_HZ[1]
+        if sampling_frequency / 2 <= band_top:
+            msg = (
+                f"an 'auto' shift measures noise up to {band_top:g} Hz, above Nyquist at "
+                f"{sampling_frequency:g} Hz; give the shift in bits or a noise_floor"
+            )
+            raise ValueError(msg)
+        n = min(_SAMPLE_SAMPLES, source.shape[0])
+        noise_floor = estimate_hf_noise(_read_channels_first(source, 0, n), sampling_frequency)
+
+    def bits(shift: int | str, auto: bool, extra: int) -> int:
+        if auto:
+            assert noise_floor is not None
+            return lsb_shift_for_noise(noise_floor) + extra
+        return int(shift)
+
+    return _ResolvedEncoding(
+        raw=raw,
+        pyramids=pyramids,
+        raw_shift=bits(encoding.raw_shift, raw_auto, 0) if raw == "shift" else 0,
+        pyramid_shift=bits(encoding.pyramid_shift, pyramid_auto, _PYRAMID_DISPLAY_BITS) if pyramids == "shift" else 0,
+    )
 
 
 def _replace_array(root: zarr.Group, dst_path: str, src_path: str) -> None:
@@ -427,6 +530,20 @@ class _ShiftStats:
     raw_total: int = 0
     pyr_total: int = 0
 
+    def add_raw(self, shifted: npt.NDArray[Any]) -> None:
+        """Accumulate one shifted raw chunk."""
+        self.raw_min = min(self.raw_min, int(shifted.min()))
+        self.raw_max = max(self.raw_max, int(shifted.max()))
+        self.raw_outliers += int(((shifted < -128) | (shifted > 127)).sum())
+        self.raw_total += shifted.size
+
+    def add_pyramid(self, shifted: npt.NDArray[Any]) -> None:
+        """Accumulate one shifted block of the finest level."""
+        self.pyr_min = min(self.pyr_min, int(shifted.min()))
+        self.pyr_max = max(self.pyr_max, int(shifted.max()))
+        self.pyr_outliers += int(((shifted < -128) | (shifted > 127)).sum())
+        self.pyr_total += shifted.size
+
 
 ProgressCallback = Callable[[int, int], None]
 """Type for progress callbacks: ``(samples_processed, total_samples)``."""
@@ -569,215 +686,99 @@ def _chunk_iter(
                 idx += 1
 
 
+def _shift(values: npt.NDArray[Any], bits: int) -> npt.NDArray[Any]:
+    """Divide by ``2**bits``, rounding to nearest (half-step bias, not truncation)."""
+    return ((values + (1 << (bits - 1))) >> bits).astype(np.int16)
+
+
 def _write_raw_and_compute_finest(
     source: Any,
-    raw_array: zarr.Array,
-    finest_array: zarr.Array | None,
+    raw_array: zarr.Array | None,
+    finest_array: zarr.Array,
     *,
     shard_samples: int,
     base_stride: int,
     n_samples: int,
-    n_channels: int,
     stats: _AccumulatedStats | None = None,
     progress: ProgressCallback | None = None,
     lsb_shift_raw: int = 0,
     lsb_shift_pyramid: int = 0,
     prefetch_chunks: int = 0,
     source_retries: int = 0,
-) -> list[npt.NDArray[Any]] | _ShiftStats:
-    """Write raw data and simultaneously compute the finest pyramid level.
+) -> _ShiftStats:
+    """Write raw (if *raw_array*) and the finest pyramid level in one pass over *source*.
 
-    Iterates over *source* in shard-aligned chunks.  For each chunk,
-    writes to *raw_array* and computes the min/max blocks.  If
-    *finest_array* is provided, writes them there; otherwise collects
-    them in a list (for quantization path where we write uint8 later).
-
-    When *lsb_shift_raw* or *lsb_shift_pyramid* > 0, right-shifts
-    values before writing and returns ``(raw_min, raw_max, pyr_min,
-    pyr_max)`` of shifted values instead of collected blocks.
+    Min/max blocks come from the unshifted values, so *stats* hold source
+    units whatever the shifts.
 
     Parameters
     ----------
     source : array-like
-        Input data with shape ``(n_samples, n_channels)``.
-    raw_array : zarr.Array
-        Output raw zarr array.
-    finest_array : zarr.Array or None
-        Output finest min/max zarr array.  If ``None``, min/max blocks
-        are collected and returned.
+        ``(n_samples, n_channels)`` source; a ``read_channels_first(t0, t1)``
+        method, if present, is used instead of slicing and transposing.
+    raw_array : zarr.Array or None
+        Output raw array; ``None`` writes the pyramid only.
+    finest_array : zarr.Array
+        Output finest min/max array.
     shard_samples : int
-        Number of time samples per shard.
+        Samples per read.
     base_stride : int
-        Base stride for the finest pyramid level.
+        Stride of the finest pyramid level.
     n_samples : int
         Total number of samples.
-    n_channels : int
-        Number of channels.
     stats : _AccumulatedStats or None, optional
-        If provided, accumulate per-channel stats during the pass.
+        Per-channel extremes to accumulate.
     progress : callable or None, optional
-        Called with ``(samples_processed, total_samples)`` after each chunk.
-    lsb_shift_raw : int, optional
-        Right-shift for raw data before writing. Default 0 (lossless).
-    lsb_shift_pyramid : int, optional
-        Right-shift for pyramid data before writing. Default 0 (lossless).
+        Called with ``(samples_processed, total_samples)`` after each read.
+    lsb_shift_raw, lsb_shift_pyramid : int, optional
+        Bits to shift off before writing; 0 writes values unchanged.
     prefetch_chunks : int, optional
-        Number of source chunks to prefetch in background threads.
-        ``0`` (default) disables prefetch.
+        Reads to run ahead in background threads.
+    source_retries : int, optional
+        Retries for a transient ``OSError`` on read.
 
     Returns
     -------
-    list[np.ndarray] or _ShiftStats
-        Without LSB shift: list of min/max block arrays (empty if
-        *finest_array* was provided). With LSB shift: :class:`_ShiftStats`
-        with global min/max and outlier counts.
+    _ShiftStats
+        Extremes and int8 outlier counts of the shifted values.
     """
-    collected: list[npt.NDArray[Any]] = []
-    raw_s_min = np.iinfo(np.int16).max
-    raw_s_max = np.iinfo(np.int16).min
-    pyr_s_min = np.iinfo(np.int16).max
-    pyr_s_max = np.iinfo(np.int16).min
-    raw_outliers = 0
-    pyr_outliers = 0
-    raw_total = 0
-    pyr_total = 0
-
-    # A source that can hand back (C, T) itself transposes in pieces, off this one thread.
-    read_channels_first = getattr(source, "read_channels_first", None)
+    shift_stats = _ShiftStats(
+        raw_min=np.iinfo(np.int16).max,
+        raw_max=np.iinfo(np.int16).min,
+        pyr_min=np.iinfo(np.int16).max,
+        pyr_max=np.iinfo(np.int16).min,
+    )
 
     def _read_source(t0: int, t1: int) -> npt.NDArray[Any]:
-        if read_channels_first is not None:
-            return np.asarray(read_channels_first(t0, t1))
-        return np.ascontiguousarray(np.asarray(source[t0:t1, :]).T)  # (T,C) → (C,T)
+        return _read_channels_first(source, t0, t1)
 
     read_fn = _retry_on_oserror(_read_source, source_retries)
 
     for t0, t1, chunk in _chunk_iter(read_fn, n_samples, shard_samples, prefetch_chunks):
-        # Compute finest min/max from ORIGINAL (unshifted) data
         mm = _compute_minmax_block(chunk, base_stride)
 
-        # Apply shifts (round-to-nearest via half-step bias, not truncation)
-        if lsb_shift_raw > 0:
-            raw_chunk = ((chunk + (1 << (lsb_shift_raw - 1))) >> lsb_shift_raw).astype(np.int16)
-            raw_s_min = min(raw_s_min, int(raw_chunk.min()))
-            raw_s_max = max(raw_s_max, int(raw_chunk.max()))
-            raw_outliers += int(((raw_chunk < -128) | (raw_chunk > 127)).sum())
-            raw_total += raw_chunk.size
-        else:
+        if raw_array is not None:
             raw_chunk = chunk
+            if lsb_shift_raw > 0:
+                raw_chunk = _shift(chunk, lsb_shift_raw)
+                shift_stats.add_raw(raw_chunk)
+            raw_array[:, t0:t1] = raw_chunk
 
+        mm_out = mm
         if lsb_shift_pyramid > 0:
-            mm_shifted = ((mm + (1 << (lsb_shift_pyramid - 1))) >> lsb_shift_pyramid).astype(np.int16)
-            pyr_s_min = min(pyr_s_min, int(mm_shifted.min()))
-            pyr_s_max = max(pyr_s_max, int(mm_shifted.max()))
-            pyr_outliers += int(((mm_shifted < -128) | (mm_shifted > 127)).sum())
-            pyr_total += mm_shifted.size
-        else:
-            mm_shifted = mm
+            mm_out = _shift(mm, lsb_shift_pyramid)
+            shift_stats.add_pyramid(mm_out)
+        b0 = t0 // base_stride
+        finest_array[:, :, b0 : b0 + mm_out.shape[2]] = mm_out
 
-        # Write raw
-        raw_array[:, t0:t1] = raw_chunk
-
-        # Write pyramid
-        if finest_array is not None:
-            b0 = t0 // base_stride
-            b1 = b0 + mm_shifted.shape[2]
-            finest_array[:, :, b0:b1] = mm_shifted
-        else:
-            collected.append(mm)
-
-        # Accumulate stats — mm extremes double as raw extremes (see
-        # _AccumulatedStats docstring), so only one update call is needed.
+        # mm extremes double as raw extremes (see _AccumulatedStats).
         if stats is not None:
             stats.update_minmax(mm)
 
         if progress is not None:
             progress(t1, n_samples)
 
-    if lsb_shift_raw > 0 or lsb_shift_pyramid > 0:
-        return _ShiftStats(
-            raw_min=raw_s_min,
-            raw_max=raw_s_max,
-            pyr_min=pyr_s_min,
-            pyr_max=pyr_s_max,
-            raw_outliers=raw_outliers,
-            pyr_outliers=pyr_outliers,
-            raw_total=raw_total,
-            pyr_total=pyr_total,
-        )
-    return collected
-
-
-def _build_finest_from_raw(
-    raw_array: zarr.Array,
-    finest_array: zarr.Array | None,
-    *,
-    shard_samples: int,
-    base_stride: int,
-    n_samples: int,
-    stats: _AccumulatedStats | None = None,
-    progress: ProgressCallback | None = None,
-    prefetch_chunks: int = 0,
-    source_retries: int = 0,
-) -> list[npt.NDArray[Any]]:
-    """Build the finest pyramid level by reading an existing raw array.
-
-    Parameters
-    ----------
-    raw_array : zarr.Array
-        Source raw zarr array.
-    finest_array : zarr.Array or None
-        Output finest min/max zarr array.  If ``None``, blocks are
-        collected and returned.
-    shard_samples : int
-        Number of time samples per read chunk.
-    base_stride : int
-        Base stride for the finest pyramid level.
-    n_samples : int
-        Total number of samples.
-    stats : _AccumulatedStats or None, optional
-        If provided, accumulate per-channel stats during the pass.
-    progress : callable or None, optional
-        Called with ``(samples_processed, total_samples)`` after each chunk.
-    prefetch_chunks : int, optional
-        Number of source chunks to prefetch in background threads.
-        ``0`` (default) disables prefetch.
-
-    Returns
-    -------
-    list[np.ndarray]
-        List of min/max block arrays.  Empty if *finest_array* was
-        provided.
-    """
-    collected: list[npt.NDArray[Any]] = []
-
-    # Detect if source is (T, C) or (C, T)
-    is_tc = raw_array.shape[0] > raw_array.shape[1]
-
-    def _read_raw(t0: int, t1: int) -> npt.NDArray[Any]:
-        if is_tc:
-            return np.ascontiguousarray(np.asarray(raw_array[t0:t1, :]).T)
-        return np.asarray(raw_array[:, t0:t1])
-
-    read_fn = _retry_on_oserror(_read_raw, source_retries)
-
-    for t0, t1, chunk in _chunk_iter(read_fn, n_samples, shard_samples, prefetch_chunks):
-        mm = _compute_minmax_block(chunk, base_stride)
-
-        if finest_array is not None:
-            b0 = t0 // base_stride
-            b1 = b0 + mm.shape[2]
-            finest_array[:, :, b0:b1] = mm
-        else:
-            collected.append(mm)
-
-        if stats is not None:
-            stats.update_minmax(mm)
-
-        if progress is not None:
-            progress(t1, n_samples)
-
-    return collected
+    return shift_stats
 
 
 def _build_cascade_levels(
@@ -863,132 +864,123 @@ def _build_cascade_levels(
         prev_array = new_array
 
 
-def _quantize_raw_in_place(
+def _range_fit_array(
     root: zarr.Group,
-    raw_quantization: RawQuantization,
+    path: str,
+    encode: Callable[[npt.NDArray[Any]], npt.NDArray[Any]],
     *,
-    cfg: ChunkConfig,
-    n_samples: int,
-    n_channels: int,
+    dtype: str,
+    chunks: tuple[int, ...],
+    shards: tuple[int, ...],
     compressor: str | BytesBytesCodec,
-) -> None:
-    """Replace the float32 raw array with a quantized unsigned int array.
-
-    Reads the existing float32 ``/raw``, quantizes in chunks, writes to
-    a new ``/raw_quantized`` array, then deletes ``/raw`` and renames.
-
-    Parameters
-    ----------
-    root : zarr.Group
-        The zarr store root group (opened in write mode).
-    raw_quantization : RawQuantization
-        Quantization parameters.
-    cfg : ChunkConfig
-        Chunk/shard configuration.
-    n_samples : int
-        Total samples.
-    n_channels : int
-        Number of channels.
-    compressor : str or Codec
-        Compressor preset or codec instance.
-    """
-    offset = np.array(raw_quantization.offset)
-    scale = np.array(raw_quantization.scale)
-    q_dtype = raw_quantization.quantized_dtype
-
-    # Read the float32 raw array, quantize chunks, buffer in memory,
-    # then replace the array.  zarr v3 does not support move/rename.
-    old_raw: zarr.Array = root["raw"]  # type: ignore[assignment]
-
-    shard_samples = cfg.raw_shard[1]  # time axis is now axis 1
-    quantized_chunks: list[tuple[int, int, npt.NDArray[Any]]] = []
-    for t0 in range(0, n_samples, shard_samples):
-        t1 = min(t0 + shard_samples, n_samples)
-        chunk = np.asarray(old_raw[:, t0:t1])  # (C, T_chunk)
-        quantized_chunks.append((t0, t1, quantize_array(chunk, offset, scale, q_dtype)))
-
-    # Delete float32 raw and create quantized replacement
-    del root["raw"]
-    q_array = _create_zarr_array(
+    attrs: dict[str, Any],
+) -> zarr.Array:
+    """Re-encode the array at *path* with *encode*, one shard at a time, and return it."""
+    old: zarr.Array = root[path]  # type: ignore[assignment]
+    tmp_path = path + "__range_tmp"
+    tmp = _create_zarr_array(
         root,
-        "raw",
-        shape=(n_channels, n_samples),
-        dtype=q_dtype,
-        chunks=cfg.raw_chunk,
-        shards=cfg.raw_shard,
+        tmp_path,
+        shape=old.shape,
+        dtype=dtype,
+        chunks=chunks,
+        shards=shards,
         compressor=compressor,
         quantized=True,
     )
+    last_axis = len(old.shape) - 1
+    lead = (slice(None),) * last_axis
+    for i0 in range(0, old.shape[last_axis], shards[last_axis]):
+        sl = (*lead, slice(i0, min(i0 + shards[last_axis], old.shape[last_axis])))
+        tmp[sl] = encode(np.asarray(old[sl]))
+    tmp.attrs.update(attrs)
+    _replace_array(root, path, tmp_path)
+    return root[path]  # type: ignore[return-value]
 
-    for t0, t1, q_chunk in quantized_chunks:
-        q_array[:, t0:t1] = q_chunk
 
-    # Store quantization params in array attrs
-    q_array.attrs.update({"quantization": raw_quantization.to_dict()})
-
-
-def _build_non_quantized(
+def _narrow_to_int8(
+    root: zarr.Group,
+    paths: list[str],
     *,
+    label: str,
+    s_min: int,
+    s_max: int,
+    outliers: int,
+    total: int,
+    clip_outliers: bool,
+    chunks: tuple[int, ...],
+    shards: tuple[int, ...],
+    compressor: str | BytesBytesCodec,
+    entropy: float | None,
+    is_pyramid: bool,
+) -> None:
+    """Store shifted arrays as int8 when they fit, or when clipping a rare few makes them fit."""
+    clip = False
+    if not (s_min >= -128 and s_max <= 127):
+        if not (clip_outliers and total > 0 and outliers / total < _CLIP_THRESHOLD):
+            log.info(
+                "Keeping int16 for %s: %d values (%.4f%%) exceed int8", label, outliers, 100 * outliers / max(total, 1)
+            )
+            return
+        log.info("Clipping %d %s values (%.6f%%) to fit int8", outliers, label, 100 * outliers / total)
+        clip = True
+    for path in paths:
+        _convert_array_to_int8(
+            root, path, chunks, shards, compressor, entropy=entropy, is_pyramid=is_pyramid, clip=clip
+        )
+
+
+def _write_encoded(
     source: Any,
     root: zarr.Group,
+    *,
+    plan: _ResolvedEncoding,
+    encoding: EncodingConfig,
+    writes_raw: bool,
+    source_dtype: str,
     strides: list[int],
-    finest_stride: int,
-    finest_n_blocks: int,
-    n_samples: int,
-    n_channels: int,
-    dtype: str,
     cfg: ChunkConfig,
     stride_factor: int,
     compressor: str | BytesBytesCodec,
-    lsb_shift_raw: int | str,
-    lsb_shift_pyramid: int | str,
-    noise_floor: float | None,
     progress: ProgressCallback | None,
-    clip_outliers: bool = True,
-    prefetch_chunks: int = 0,
-    source_retries: int = 0,
-) -> tuple[int, int]:
-    """Build raw + pyramid arrays with optional LSB shift.
+    prefetch_chunks: int,
+    source_retries: int,
+) -> None:
+    """Write raw (if *writes_raw*) and every pyramid level of *source*, encoded per *plan*.
 
-    Returns ``(raw_shift, pyr_shift)`` — the resolved shift values
-    (0 if no shift).
+    One pass writes raw and the finest level, shifted where the plan shifts;
+    range-fit arrays are then re-encoded from the pass's extremes, and coarser
+    levels cascade on the encoded values, which every encoding keeps in order.
     """
-    raw_shift = _resolve_lsb_shift(lsb_shift_raw, source, n_samples, noise_floor)
-    pyr_shift = _resolve_lsb_shift(
-        lsb_shift_pyramid,
-        source,
-        n_samples,
-        noise_floor,
-        extra_shift=2,
-    )
-
-    # Compute entropy from first shard for shuffle auto-selection
-    n_sample_ent = min(30_000, n_samples)
-    sample_ct = np.ascontiguousarray(np.asarray(source[0:n_sample_ent, :]).T)
+    n_samples, n_channels = source.shape
+    finest_stride = strides[0]
     raw_entropy: float | None = None
     pyr_entropy: float | None = None
-    if raw_shift > 0:
-        raw_entropy = compute_entropy((sample_ct + (1 << (raw_shift - 1))) >> raw_shift)
-    if pyr_shift > 0:
-        mm_sample = _compute_minmax_block(sample_ct, finest_stride)
-        pyr_entropy = compute_entropy((mm_sample + (1 << (pyr_shift - 1))) >> pyr_shift)
+    if plan.raw_shift > 0 or plan.pyramid_shift > 0:
+        sample = _read_channels_first(source, 0, min(_SAMPLE_SAMPLES, n_samples))
+        if plan.raw_shift > 0:
+            raw_entropy = compute_entropy(_shift(sample, plan.raw_shift))
+        if plan.pyramid_shift > 0:
+            pyr_entropy = compute_entropy(_shift(_compute_minmax_block(sample, finest_stride), plan.pyramid_shift))
 
-    # Create arrays
-    raw_array = _create_zarr_array(
-        root,
-        "raw",
-        shape=(n_channels, n_samples),
-        dtype=dtype,
-        chunks=cfg.raw_chunk,
-        shards=cfg.raw_shard,
-        compressor=compressor,
-        entropy=raw_entropy,
-    )
+    raw_array = None
+    if writes_raw:
+        raw_array = _create_zarr_array(
+            root,
+            "raw",
+            shape=(n_channels, n_samples),
+            dtype=source_dtype,
+            chunks=cfg.raw_chunk,
+            shards=cfg.raw_shard,
+            compressor=compressor,
+            entropy=raw_entropy,
+        )
+    finest_path = minmax_path(finest_stride).lstrip("/")
     finest_array = _create_zarr_array(
         root,
-        minmax_path(finest_stride).lstrip("/"),
-        shape=(n_channels, 2, finest_n_blocks),
-        dtype=dtype,
+        finest_path,
+        shape=(n_channels, 2, n_blocks(n_samples, finest_stride)),
+        dtype=source_dtype,
         chunks=cfg.minmax_chunk,
         shards=cfg.minmax_shard,
         compressor=compressor,
@@ -996,118 +988,145 @@ def _build_non_quantized(
         is_pyramid=True,
     )
 
-    # Write with shift, tracking min/max of shifted values
-    result = _write_raw_and_compute_finest(
+    fit_raw = plan.raw == "range" and encoding.raw_quantization is None
+    fit_pyramids = plan.pyramids == "range" and encoding.level_quantization is None
+    stats = _AccumulatedStats.create(n_channels, source_dtype) if fit_raw or fit_pyramids else None
+
+    shift_stats = _write_raw_and_compute_finest(
         source,
         raw_array,
         finest_array,
         shard_samples=cfg.raw_shard[1],
         base_stride=finest_stride,
         n_samples=n_samples,
-        n_channels=n_channels,
+        stats=stats,
         progress=progress,
-        lsb_shift_raw=raw_shift,
-        lsb_shift_pyramid=pyr_shift,
+        lsb_shift_raw=plan.raw_shift,
+        lsb_shift_pyramid=plan.pyramid_shift,
         prefetch_chunks=prefetch_chunks,
         source_retries=source_retries,
     )
 
-    _build_cascade_levels(
-        root,
-        finest_array,
-        strides,
-        n_samples=n_samples,
-        n_channels=n_channels,
-        dtype=dtype,
-        chunk_config=cfg,
-        stride_factor=stride_factor,
-        compressor=compressor,
-        entropy=pyr_entropy,
-    )
+    level_paths = [minmax_path(s).lstrip("/") for s in strides]
+    if plan.pyramids == "range":
+        lq = encoding.level_quantization
+        if lq is None:
+            assert stats is not None
+            dtype = encoding.pyramid_range_dtype
+            min_offset, min_scale = compute_quantization_params(stats.mm_min_min, stats.mm_min_max, dtype)
+            max_offset, max_scale = compute_quantization_params(stats.mm_max_min, stats.mm_max_max, dtype)
+            lq = LevelQuantization(
+                min_offset=min_offset.tolist(),
+                max_offset=max_offset.tolist(),
+                scale=np.maximum(min_scale, max_scale).tolist(),
+                source_dtype=source_dtype,
+                quantized_dtype=dtype,
+            )
+        lq_min, lq_max, lq_scale = np.array(lq.min_offset), np.array(lq.max_offset), np.array(lq.scale)
 
-    # Store lsb_shift in array attrs (before int8 conversion so attrs are preserved)
-    if raw_shift > 0:
-        raw_arr: zarr.Array = root["raw"]  # type: ignore[assignment]
-        raw_arr.attrs.update({"lsb_shift": raw_shift, "original_dtype": dtype})
-    if pyr_shift > 0:
-        for s in strides:
-            pyr_arr: zarr.Array = root[minmax_path(s).lstrip("/")]  # type: ignore[assignment]
-            pyr_arr.attrs.update({"lsb_shift": pyr_shift, "original_dtype": dtype})
+        def encode_minmax(mm: npt.NDArray[Any]) -> npt.NDArray[Any]:
+            return np.stack(
+                [
+                    quantize_array(mm[:, 0, :], lq_min, lq_scale, lq.quantized_dtype),
+                    quantize_array(mm[:, 1, :], lq_max, lq_scale, lq.quantized_dtype),
+                ],
+                axis=1,
+            )
 
-    # Convert to int8 if range fits, or clip rare outliers
-    CLIP_THRESHOLD = 0.0001  # 0.01%
+        finest_array = _range_fit_array(
+            root,
+            finest_path,
+            encode_minmax,
+            dtype=lq.quantized_dtype,
+            chunks=cfg.minmax_chunk,
+            shards=cfg.minmax_shard,
+            compressor=compressor,
+            attrs={"quantization": lq.to_dict()},
+        )
+        _build_cascade_levels(
+            root,
+            finest_array,
+            strides,
+            n_samples=n_samples,
+            n_channels=n_channels,
+            dtype=lq.quantized_dtype,
+            chunk_config=cfg,
+            stride_factor=stride_factor,
+            compressor=compressor,
+            quantized=True,
+        )
+        for path in level_paths[1:]:
+            root[path].attrs.update({"quantization": lq.to_dict()})
+    else:
+        _build_cascade_levels(
+            root,
+            finest_array,
+            strides,
+            n_samples=n_samples,
+            n_channels=n_channels,
+            dtype=source_dtype,
+            chunk_config=cfg,
+            stride_factor=stride_factor,
+            compressor=compressor,
+            entropy=pyr_entropy,
+        )
+        if plan.pyramid_shift > 0:
+            for path in level_paths:
+                root[path].attrs.update({"lsb_shift": plan.pyramid_shift, "original_dtype": source_dtype})
+            _narrow_to_int8(
+                root,
+                level_paths,
+                label="pyramid",
+                s_min=shift_stats.pyr_min,
+                s_max=shift_stats.pyr_max,
+                outliers=shift_stats.pyr_outliers,
+                total=shift_stats.pyr_total,
+                clip_outliers=encoding.clip_outliers,
+                chunks=cfg.minmax_chunk,
+                shards=cfg.minmax_shard,
+                compressor=compressor,
+                entropy=pyr_entropy,
+                is_pyramid=True,
+            )
 
-    if isinstance(result, _ShiftStats):
-        # Raw array
-        if raw_shift > 0:
-            fits_int8 = result.raw_min >= -128 and result.raw_max <= 127
-            if fits_int8:
-                _convert_array_to_int8(
-                    root,
-                    "raw",
-                    cfg.raw_chunk,
-                    cfg.raw_shard,
-                    compressor,
-                    entropy=raw_entropy,
-                )
-            elif clip_outliers and result.raw_total > 0 and result.raw_outliers / result.raw_total < CLIP_THRESHOLD:
-                log.info(
-                    "Clipping %d raw outlier samples (%.6f%%) to fit int8",
-                    result.raw_outliers,
-                    100 * result.raw_outliers / result.raw_total,
-                )
-                _convert_array_to_int8(
-                    root,
-                    "raw",
-                    cfg.raw_chunk,
-                    cfg.raw_shard,
-                    compressor,
-                    entropy=raw_entropy,
-                    clip=True,
-                )
-            else:
-                log.info(
-                    "Keeping int16 for raw: %d samples (%.4f%%) exceed int8 range",
-                    result.raw_outliers,
-                    100 * result.raw_outliers / max(result.raw_total, 1),
-                )
-
-        # Pyramid arrays
-        if pyr_shift > 0:
-            fits_int8 = result.pyr_min >= -128 and result.pyr_max <= 127
-            if fits_int8:
-                for s in strides:
-                    _convert_array_to_int8(
-                        root,
-                        minmax_path(s).lstrip("/"),
-                        cfg.minmax_chunk,
-                        cfg.minmax_shard,
-                        compressor,
-                        entropy=pyr_entropy,
-                        is_pyramid=True,
-                    )
-            elif clip_outliers and result.pyr_total > 0 and result.pyr_outliers / result.pyr_total < CLIP_THRESHOLD:
-                log.info(
-                    "Clipping %d pyramid outlier samples (%.6f%%) to fit int8",
-                    result.pyr_outliers,
-                    100 * result.pyr_outliers / result.pyr_total,
-                )
-                for s in strides:
-                    _convert_array_to_int8(
-                        root,
-                        minmax_path(s).lstrip("/"),
-                        cfg.minmax_chunk,
-                        cfg.minmax_shard,
-                        compressor,
-                        entropy=pyr_entropy,
-                        is_pyramid=True,
-                        clip=True,
-                    )
-            else:
-                log.info(
-                    "Keeping int16 for pyramids: %d samples (%.4f%%) exceed int8 range",
-                    result.pyr_outliers,
-                    100 * result.pyr_outliers / max(result.pyr_total, 1),
-                )
-
-    return raw_shift, pyr_shift
+    if not writes_raw:
+        return
+    if plan.raw == "range":
+        rq = encoding.raw_quantization
+        if rq is None:
+            assert stats is not None
+            rq_offset, rq_scale = compute_quantization_params(stats.raw_min, stats.raw_max, encoding.raw_range_dtype)
+            rq = RawQuantization(
+                offset=rq_offset.tolist(),
+                scale=rq_scale.tolist(),
+                source_dtype=source_dtype,
+                quantized_dtype=encoding.raw_range_dtype,
+            )
+        rq_offset_arr, rq_scale_arr = np.array(rq.offset), np.array(rq.scale)
+        _range_fit_array(
+            root,
+            "raw",
+            lambda chunk: quantize_array(chunk, rq_offset_arr, rq_scale_arr, rq.quantized_dtype),
+            dtype=rq.quantized_dtype,
+            chunks=cfg.raw_chunk,
+            shards=cfg.raw_shard,
+            compressor=compressor,
+            attrs={"quantization": rq.to_dict()},
+        )
+    elif plan.raw_shift > 0:
+        root["raw"].attrs.update({"lsb_shift": plan.raw_shift, "original_dtype": source_dtype})
+        _narrow_to_int8(
+            root,
+            ["raw"],
+            label="raw",
+            s_min=shift_stats.raw_min,
+            s_max=shift_stats.raw_max,
+            outliers=shift_stats.raw_outliers,
+            total=shift_stats.raw_total,
+            clip_outliers=encoding.clip_outliers,
+            chunks=cfg.raw_chunk,
+            shards=cfg.raw_shard,
+            compressor=compressor,
+            entropy=raw_entropy,
+            is_pyramid=False,
+        )
