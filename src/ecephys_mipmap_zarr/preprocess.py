@@ -362,11 +362,10 @@ def _contiguous_runs(indices: list[int]) -> list[list[int]]:
 def build_source_metadata(rec: BaseRecording) -> dict[str, Any]:
     """Build the ``source_metadata`` dict for ``build_mipmap``.
 
-    Pulls per-channel properties (``channel_ids``, ``location``,
-    ``gain_to_uV``, ``offset_to_uV``), ``t_start`` (from the per-sample
-    time vector), and probe/annotation info directly from *rec*.  This
-    avoids opening the raw v2 wavpack zarr ourselves — SI already
-    loaded and decoded everything.
+    Carries everything needed to interpret the channels: ``channel_ids``, every
+    per-channel property, the probe as probeinterface JSON (contacts in channel
+    order), ``t_start``, the recording's annotations, and the chain of
+    SpikeInterface steps that produced the traces.
 
     Parameters
     ----------
@@ -379,25 +378,39 @@ def build_source_metadata(rec: BaseRecording) -> dict[str, Any]:
         Schema compatible with ``build_mipmap(source_metadata=...)``.
     """
     metadata: dict[str, Any] = {"channel_ids": np.asarray(rec.channel_ids)}
+    properties = {key: np.asarray(rec.get_property(key)) for key in rec.get_property_keys()}
 
-    for prop in ("location", "gain_to_uV", "offset_to_uV"):
-        values = rec.get_property(prop)
-        if values is not None:
-            metadata[prop] = np.asarray(values)
+    # Current SI keeps contact positions only in the attached probe, not in a ``location`` property.
+    if rec.has_probe():
+        properties["location"] = np.asarray(rec.get_channel_locations())
+        metadata["probe"] = rec.get_probegroup().to_dict(array_as_list=True)
+    metadata["properties"] = properties
+
+    for prop in ("gain_to_uV", "offset_to_uV"):
+        if prop in properties:
+            metadata[prop] = properties[prop]
 
     if rec.has_time_vector(segment_index=0):
         # get_times() would read the whole per-sample time vector for its first element.
         metadata["t_start"] = float(rec.get_start_time(segment_index=0))
 
-    # Split annotations into probe (probes_info) + everything else
     annotations = dict(getattr(rec, "_annotations", {}))
-    probes_info = annotations.pop("probes_info", None)
-    if probes_info is not None:
-        metadata["probe"] = {"probes": probes_info}
     if annotations:
         metadata["annotations"] = annotations
 
+    # inter_sample_shift survives phase_shift, so a reader needs the chain to know whether it was applied.
+    metadata["si_chain"] = _chain_step_names(rec)
     return metadata
+
+
+def _chain_step_names(rec: BaseRecording) -> list[str]:
+    """Class names of *rec*'s SpikeInterface chain, source first."""
+    names = []
+    node: Any = rec
+    while node is not None:
+        names.append(type(node).__name__)
+        node = node._kwargs.get("recording")
+    return names[::-1]
 
 
 class SIRecordingSource:

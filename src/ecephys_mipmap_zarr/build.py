@@ -180,7 +180,7 @@ def build_mipmap(
     elif source_metadata is not None:
         _write_source_metadata_dict(root, source_metadata, strides=strides)
         t_start = source_metadata.get("t_start")
-        passthrough = {k: source_metadata[k] for k in ("probe", "annotations") if k in source_metadata}
+        passthrough = {k: source_metadata[k] for k in ("probe", "annotations", "si_chain") if k in source_metadata}
         attrs_source_metadata = passthrough if passthrough else None
 
     if t_start_offset:

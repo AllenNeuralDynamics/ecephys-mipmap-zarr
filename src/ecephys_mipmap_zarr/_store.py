@@ -226,29 +226,57 @@ def _write_string_array(dst: zarr.Group, name: str, values: np.ndarray) -> None:
     arr[:] = [str(v) for v in values]
 
 
-def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
-    """Copy channel_ids and properties/location arrays from source to destination.
+_CALIBRATION_PROPERTIES = frozenset(
+    {"gain_to_uV", "offset_to_uV", "gain_to_physical_unit", "offset_to_physical_unit", "physical_unit"}
+)
+"""Left out of ``/properties``: the arrays' ``quantization`` attr already decodes to uV, so a copy would invite
+applying the gain twice."""
 
-    Parameters
-    ----------
-    src : zarr.Group
-        Source store root group.
-    dst : zarr.Group
-        Destination store root group.
+
+def _write_channel_properties(dst: zarr.Group, properties: dict[str, Any], n_channels: int) -> None:
+    """Write per-channel properties under ``/properties``, one array per name.
+
+    Skips calibration (see ``_CALIBRATION_PROPERTIES``), structured arrays such as SpikeInterface's
+    ``contact_vector`` (the probe JSON carries the same fields), and anything not indexed by channel.
     """
-    if "channel_ids" in list(src):
+    for name, values in properties.items():
+        if name in _CALIBRATION_PROPERTIES or values is None:
+            continue
+        arr = np.asarray(values)
+        if arr.dtype.names is not None or arr.ndim == 0 or arr.shape[0] != n_channels:
+            continue
+        props = dst.require_group("properties")
+        if arr.dtype.kind in "USO":
+            if arr.ndim == 1:
+                _write_string_array(props, name, arr)
+        elif arr.dtype.kind in "biuf":
+            props.create_array(name, data=arr, overwrite=True)
+
+
+def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
+    """Copy ``channel_ids`` and the per-channel ``properties`` arrays of an SI zarr to *dst*."""
+    members = list(src)
+    n_channels = None
+    if "channel_ids" in members:
         ch_ids = np.asarray(src["channel_ids"][:])  # type: ignore[index]
         _write_string_array(dst, "channel_ids", ch_ids)
+        n_channels = len(ch_ids)
 
-    if "properties" in list(src):
-        try:
-            props_src = src["properties"]
-            if "location" in list(props_src):  # type: ignore[arg-type]
-                loc = np.asarray(props_src["location"][:], dtype=np.float64)  # type: ignore[index]
-                props_dst = dst.require_group("properties")
-                props_dst.create_array("location", data=loc, overwrite=True)
-        except (KeyError, AttributeError):
-            pass  # properties group doesn't have what we need
+    if "properties" not in members:
+        return
+    props_src = src["properties"]
+    if not isinstance(props_src, zarr.Group):
+        return
+    properties: dict[str, Any] = {}
+    for name in props_src:
+        node = props_src[name]
+        if isinstance(node, zarr.Array):
+            properties[name] = np.asarray(node[:])
+    if "location" in properties:
+        properties["location"] = np.asarray(properties["location"], dtype=np.float64)
+    if n_channels is None:
+        n_channels = next((len(v) for v in properties.values() if np.ndim(v) > 0), 0)
+    _write_channel_properties(dst, properties, n_channels)
 
 
 def _read_gain_offset(src: zarr.Group) -> tuple[np.ndarray, np.ndarray] | None:
@@ -350,24 +378,27 @@ def _write_source_metadata_dict(
     metadata: dict[str, Any],
     strides: list[int],
 ) -> None:
-    """Write source metadata (channel_ids, location, gain/offset) from an in-memory dict.
+    """Write source metadata (channel_ids, per-channel properties, gain/offset) from an in-memory dict.
 
     Dict schema (all keys optional except ``channel_ids``):
 
     - ``channel_ids`` : 1D array of channel labels, required
-    - ``location``   : ``(C, 2)`` probe coordinates
+    - ``properties`` : per-channel arrays by name, written under ``/properties``
+    - ``location``   : ``(C, 2)`` probe coordinates; overrides ``properties["location"]``
     - ``gain_to_uV`` / ``offset_to_uV`` : 1D float arrays for ADC
       dequantization — both must be present together
-    - ``probe`` / ``annotations`` / ``t_start`` : passed through via the
+    - ``probe`` / ``annotations`` / ``si_chain`` / ``t_start`` : passed through via the
       caller into root attrs; not written here
     """
     ch_ids = np.asarray(metadata["channel_ids"])
     _write_string_array(dst, "channel_ids", ch_ids)
 
-    loc = metadata.get("location")
-    if loc is not None:
-        props = dst.require_group("properties")
-        props.create_array("location", data=np.asarray(loc, dtype=np.float64), overwrite=True)
+    properties = dict(metadata.get("properties") or {})
+    if metadata.get("location") is not None:
+        properties["location"] = metadata["location"]
+    if "location" in properties:
+        properties["location"] = np.asarray(properties["location"], dtype=np.float64)
+    _write_channel_properties(dst, properties, len(ch_ids))
 
     gain = metadata.get("gain_to_uV")
     offset = metadata.get("offset_to_uV")

@@ -356,3 +356,21 @@ class TestDecodedChunkCache:
         with pytest.raises(OSError):
             cache[0:150]
         np.testing.assert_array_equal(cache[0:150], data[0:150])
+
+
+def test_build_source_metadata_takes_locations_from_the_probe():
+    si = pytest.importorskip("spikeinterface.core")
+    from ecephys_mipmap_zarr.preprocess import build_source_metadata
+
+    rec = si.generate_recording(num_channels=8, durations=[0.1], seed=0)
+    assert rec.get_property("location") is None  # positions live only in the probe
+    meta = build_source_metadata(rec)
+    np.testing.assert_array_equal(meta["properties"]["location"], rec.get_channel_locations())
+
+
+def test_build_source_metadata_without_a_probe_has_no_locations():
+    si = pytest.importorskip("spikeinterface.core")
+    from ecephys_mipmap_zarr.preprocess import build_source_metadata
+
+    rec = si.NumpyRecording([np.zeros((10, 4), dtype="int16")], sampling_frequency=30_000.0)
+    assert "location" not in build_source_metadata(rec)["properties"]

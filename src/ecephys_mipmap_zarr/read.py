@@ -264,6 +264,17 @@ class MipmapStore:
             return None
 
     @property
+    def channel_properties(self) -> dict[str, npt.NDArray[Any]]:
+        """Per-channel properties from the source (``location``, ``group``, ...), by name; empty if none."""
+        try:
+            props = self._root["properties"]
+        except KeyError:
+            return {}
+        if not isinstance(props, zarr.Group):
+            return {}
+        return {name: np.asarray(node[:]) for name, node in props.arrays()}
+
+    @property
     def source_metadata(self) -> dict[str, Any] | None:
         """Source metadata (probe, annotations), or ``None``."""
         return self._attrs.source_metadata
