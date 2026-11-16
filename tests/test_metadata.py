@@ -288,6 +288,7 @@ class TestMipmapAttrs:
             "dtype",
             "source_metadata",
             "raw_source",
+            "raw_path",
             "t_start",
         }
 

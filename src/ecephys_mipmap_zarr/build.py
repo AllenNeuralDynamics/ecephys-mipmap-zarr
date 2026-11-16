@@ -247,7 +247,8 @@ def add_pyramid(
         does not suit the source.
     """
     src_root = _open_store(raw_store, mode="r")
-    source = _StoredRawSource(_find_raw_array(src_root, raw_path))
+    raw_array = _find_raw_array(src_root, raw_path)
+    source = _StoredRawSource(raw_array)
     n_samples, n_channels = source.shape
     raw_dtype = str(source.dtype)
 
@@ -300,6 +301,7 @@ def add_pyramid(
         n_channels=n_channels,
         dtype=raw_dtype,
         raw_source=str(raw_store),
+        raw_path=raw_array.path,
         source_metadata=source_metadata,
         t_start=t_start,
     )

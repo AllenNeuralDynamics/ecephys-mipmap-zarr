@@ -39,7 +39,7 @@ import numpy as np
 import numpy.typing as npt
 import zarr
 
-from ecephys_mipmap_zarr._store import _default_cache_dir, _open_store
+from ecephys_mipmap_zarr._store import _default_cache_dir, _find_raw_array, _open_store
 from ecephys_mipmap_zarr.metadata import (
     LevelQuantization,
     MipmapAttrs,
@@ -188,7 +188,7 @@ class MipmapStore:
 
         # Locate raw array
         if raw_group is not None:
-            self._raw_array: zarr.Array | None = raw_group["raw"]  # type: ignore[assignment]
+            self._raw_array: zarr.Array | None = _find_raw_array(raw_group, attrs.raw_path or "raw")
         else:
             try:
                 self._raw_array = root["raw"]  # type: ignore[assignment]

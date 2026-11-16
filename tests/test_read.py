@@ -261,6 +261,42 @@ class TestGetWindowPyramidOnly:
         assert result.is_raw
         np.testing.assert_array_equal(result.data, source_data[0:100, :].T)
 
+    @pytest.mark.parametrize("array_name", ["traces_seg0", "traces_seg1"])
+    def test_raw_from_si_layout_store(self, tmp_path, source_data, array_name):
+        """Raw comes from the array add_pyramid read, in a (T, C) zarr v2 store, under any name."""
+        si_path = tmp_path / "si.zarr"
+        si_root = zarr.open_group(str(si_path), mode="w", zarr_format=2)
+        si_root.attrs["sampling_frequency"] = 30000.0
+        si_root.create_array(array_name, data=source_data, chunks=(4096, 4))
+
+        pyr_path = tmp_path / "pyramid.zarr"
+        add_pyramid(
+            si_path,
+            pyr_path,
+            units="uV",
+            raw_path=array_name,
+            config=BuildConfig(chunk_config=SMALL_CFG),
+            encoding=LOSSLESS_ENCODING,
+        )
+        store = open_mipmap(pyr_path)
+        assert store._attrs.raw_path == array_name
+        result = store.get_window(1000, 1100, num_points=1000)
+        assert result.is_raw
+        np.testing.assert_array_equal(result.data, source_data[1000:1100, :].T)
+
+    def test_store_without_raw_path_probes_usual_names(self, pyramid_only_store, source_data):
+        """Stores written before raw_path was recorded still find ``raw``."""
+        pyr_path, _ = pyramid_only_store
+        root = zarr.open_group(str(pyr_path), mode="r+")
+        attrs = dict(root.attrs)
+        del attrs["raw_path"]
+        root.attrs.clear()
+        root.attrs.update(attrs)
+        zarr.consolidate_metadata(str(pyr_path))
+
+        result = open_mipmap(pyr_path).get_window(0, 100, num_points=1000)
+        np.testing.assert_array_equal(result.data, source_data[0:100, :].T)
+
     def test_minmax_works(self, pyramid_only_store):
         pyr_path, _ = pyramid_only_store
         store = open_mipmap(pyr_path)

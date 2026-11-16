@@ -280,6 +280,9 @@ class MipmapAttrs:
     raw_source : str or None
         Path or URI to the external store containing ``/raw``, or ``None``
         when raw data is co-located in the same store as the pyramids.
+    raw_path : str or None
+        Path of the raw array inside ``raw_source``.  ``None`` means probe the
+        usual names (``raw``, ``traces_seg0``).
     source_metadata : dict or None
         Optional metadata copied from the source store (e.g. SpikeInterface
         probe geometry, annotations).  ``None`` if no source metadata.
@@ -296,6 +299,7 @@ class MipmapAttrs:
     n_channels: int
     dtype: str = DEFAULT_DTYPE
     raw_source: str | None = None
+    raw_path: str | None = None
     source_metadata: dict[str, Any] | None = None
     t_start: float | None = None
 
@@ -317,6 +321,8 @@ class MipmapAttrs:
         object.__setattr__(self, "dtype", str(self.dtype))
         if self.raw_source is not None:
             object.__setattr__(self, "raw_source", str(self.raw_source))
+        if self.raw_path is not None:
+            object.__setattr__(self, "raw_path", str(self.raw_path))
         if self.t_start is not None:
             object.__setattr__(self, "t_start", float(self.t_start))
 
@@ -349,6 +355,7 @@ class MipmapAttrs:
             If required keys are missing.
         """
         raw_source = d.get("raw_source")
+        raw_path = d.get("raw_path")
         source_metadata = d.get("source_metadata")
         t_start = d.get("t_start")
         return cls(
@@ -359,6 +366,7 @@ class MipmapAttrs:
             n_channels=int(d["n_channels"]),
             dtype=str(d.get("dtype", DEFAULT_DTYPE)),
             raw_source=str(raw_source) if raw_source is not None else None,
+            raw_path=str(raw_path) if raw_path is not None else None,
             source_metadata=dict(source_metadata) if source_metadata is not None else None,
             t_start=float(t_start) if t_start is not None else None,
         )
