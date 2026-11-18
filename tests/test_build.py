@@ -1284,6 +1284,12 @@ class TestEncoding:
         with pytest.raises(ValueError, match="no raw array"):
             add_pyramid(raw_store, tmp_path / "pyr.zarr", config=self._cfg(), encoding=EncodingConfig(raw_shift=2))
 
+    @pytest.mark.parametrize("encoding", [EncodingConfig(raw="shift", raw_shift=2), EncodingConfig(raw="range")])
+    def test_add_pyramid_refuses_encoded_raw(self, tmp_path, encoding):
+        _, raw_store = self._build(tmp_path, encoding)
+        with pytest.raises(ValueError, match="needs unencoded raw"):
+            add_pyramid(raw_store, tmp_path / "pyr.zarr", config=self._cfg())
+
     def test_add_pyramid_auto_shift_matches_build(self, tmp_path):
         """A channel-first stored raw gives the same auto shift as the (T, C) source it came from."""
         source = self._source()

@@ -276,6 +276,11 @@ def add_pyramid(
     """
     src_root = _open_store(raw_store, mode="r")
     raw_array = _find_raw_array(src_root, raw_path)
+    # Pyramids are computed from stored values, which for an encoded array are codes on another scale than raw.
+    encoded_by = sorted({"lsb_shift", "quantization"} & set(raw_array.attrs))
+    if encoded_by:
+        msg = f"raw array {raw_array.path!r} is encoded ({', '.join(encoded_by)}); add_pyramid needs unencoded raw"
+        raise ValueError(msg)
     source = _StoredRawSource(raw_array)
     n_samples, n_channels = source.shape
     raw_dtype = str(source.dtype)
