@@ -290,6 +290,7 @@ class TestMipmapAttrs:
             "raw_source",
             "raw_path",
             "t_start",
+            "format_version",
         }
 
     def test_raw_source(self):

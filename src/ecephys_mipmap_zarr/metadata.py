@@ -77,6 +77,12 @@ DEFAULT_CHANNEL_CHUNK: int = 64
 DEFAULT_DTYPE: str = "int16"
 """Default data type for raw and minmax arrays."""
 
+FORMAT_VERSION: int = 1
+"""Store layout version; a reader refuses stores with a higher one."""
+
+COUNTS_UNITS: str = "counts"
+"""Units of integer values decoded without an ADC gain."""
+
 # ---------------------------------------------------------------------------
 # Zarr path conventions
 # ---------------------------------------------------------------------------
@@ -267,7 +273,8 @@ class MipmapAttrs:
     sampling_frequency : float
         Sampling rate in Hz.
     units : str
-        Physical units of the data (e.g. ``"uV"``).
+        Units the stored values decode to: ``"uV"`` when an ADC gain is composed into the
+        encoding, ``"counts"`` for integer values without one, or what the builder was told.
     strides : list[int]
         Computed stride sequence, ascending (e.g. ``[32, 256, 2048]``).
     n_samples : int
@@ -290,6 +297,9 @@ class MipmapAttrs:
         Start time of the recording in seconds (from the acquisition
         clock or ``times_seg0[0]`` in an SI zarr).  ``None`` if not
         available.  Used by the viewer to offset the time axis.
+    format_version : int
+        Store layout version (:data:`FORMAT_VERSION`); stores written before
+        it was recorded read as version 1.
     """
 
     sampling_frequency: float
@@ -302,6 +312,7 @@ class MipmapAttrs:
     raw_path: str | None = None
     source_metadata: dict[str, Any] | None = None
     t_start: float | None = None
+    format_version: int = FORMAT_VERSION
 
     def __post_init__(self) -> None:
         """Coerce numpy scalars / dtype objects to plain Python types.
@@ -325,6 +336,7 @@ class MipmapAttrs:
             object.__setattr__(self, "raw_path", str(self.raw_path))
         if self.t_start is not None:
             object.__setattr__(self, "t_start", float(self.t_start))
+        object.__setattr__(self, "format_version", int(self.format_version))
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict suitable for ``zarr.Group.attrs``.
@@ -369,6 +381,7 @@ class MipmapAttrs:
             raw_path=str(raw_path) if raw_path is not None else None,
             source_metadata=dict(source_metadata) if source_metadata is not None else None,
             t_start=float(t_start) if t_start is not None else None,
+            format_version=int(d.get("format_version", 1)),
         )
 
 

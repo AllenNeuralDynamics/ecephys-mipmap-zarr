@@ -274,8 +274,8 @@ class BuildSettings:
     """Length of the source window to include, in seconds; default = rest of recording."""
     sampling_frequency: float | None = None
     """Sampling rate in Hz (auto-detected for .cbin)."""
-    units: str = "uV"
-    """Physical units."""
+    units: str | None = None
+    """Units the values decode to (default: uV with an ADC gain, counts for integer sources without one)."""
     n_samples: int | None = None
     """Number of samples (required for .dat)."""
     n_channels: int | None = None
@@ -463,8 +463,8 @@ class AddPyramidSettings:
     """Output pyramid store path."""
     sampling_frequency: float | None = None
     """Sampling rate in Hz (auto-detected from zarr attrs if omitted)."""
-    units: str = "uV"
-    """Physical units."""
+    units: str | None = None
+    """Units the values decode to (default: counts for integer raw; required for float)."""
     raw_path: str = "raw"
     """Path to raw array in store."""
     pyramid_encoding: Literal["shift", "range", "none"] | None = None

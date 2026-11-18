@@ -297,6 +297,15 @@ def _read_gain_offset(src: zarr.Group) -> tuple[np.ndarray, np.ndarray] | None:
     return gain, offset
 
 
+def _metadata_gain_offset(metadata: dict[str, Any]) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return ``(gain_to_uV, offset_to_uV)`` from a source-metadata dict, or ``None`` unless both are present."""
+    gain = metadata.get("gain_to_uV")
+    offset = metadata.get("offset_to_uV")
+    if gain is None or offset is None:
+        return None
+    return np.asarray(gain), np.asarray(offset)
+
+
 def _pop_encoding(array: zarr.Array) -> tuple[dict[str, Any], int, dict[str, Any] | None]:
     """Return *array*'s attrs without its shift attrs, the shift in bits, and its range fit if any."""
     attrs: dict[str, Any] = dict(array.attrs)
@@ -400,10 +409,7 @@ def _write_source_metadata_dict(
         properties["location"] = np.asarray(properties["location"], dtype=np.float64)
     _write_channel_properties(dst, properties, len(ch_ids))
 
-    gain = metadata.get("gain_to_uV")
-    offset = metadata.get("offset_to_uV")
-    if gain is not None and offset is not None:
-        gain_arr = np.asarray(gain)
-        offset_arr = np.asarray(offset)
-        _write_raw_quantization(dst, gain_arr, offset_arr)
-        _write_pyramid_quantization(dst, gain_arr, offset_arr, strides=strides)
+    pair = _metadata_gain_offset(metadata)
+    if pair is not None:
+        _write_raw_quantization(dst, *pair)
+        _write_pyramid_quantization(dst, *pair, strides=strides)

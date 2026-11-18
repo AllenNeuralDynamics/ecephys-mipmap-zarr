@@ -82,6 +82,7 @@ class TestBuildFromBinary:
             n_samples=100_000,
             n_channels=4,
             dtype="float32",
+            units="uV",
         )
         settings.cli_cmd()
 
@@ -239,7 +240,7 @@ class TestCLIParsing:
             "start_seconds": 0.0,
             "duration_seconds": None,
             "sampling_frequency": 30000.0,
-            "units": "uV",
+            "units": None,
             "n_samples": 10,
             "n_channels": 2,
             "dtype": "int16",

@@ -14,6 +14,7 @@ from ecephys_mipmap_zarr.build import (
     ensure_pyramid,
 )
 from ecephys_mipmap_zarr.metadata import (
+    FORMAT_VERSION,
     LOSSLESS_ENCODING,
     BuildConfig,
     ChunkConfig,
@@ -1299,3 +1300,73 @@ class TestEncoding:
             return dict(zarr.open_group(str(path), mode="r", use_consolidated=None)["minmax/s32"].attrs)["lsb_shift"]
 
         assert s32_shift(pyramid) == s32_shift(built)
+
+
+class TestUnits:
+    CFG = TestEncoding()._cfg()
+
+    def _units(self, path):
+        return MipmapAttrs.from_dict(dict(zarr.open_group(str(path), mode="r", use_consolidated=None).attrs)).units
+
+    def _build(self, tmp_path, source, **kwargs):
+        out = tmp_path / "units.zarr"
+        build_mipmap(source, out, sampling_frequency=30000.0, config=self.CFG, **kwargs)
+        return out
+
+    def test_integer_source_without_gain_decodes_to_counts(self, tmp_path):
+        assert self._units(self._build(tmp_path, TestEncoding()._source())) == "counts"
+
+    def test_gain_makes_units_uv(self, tmp_path):
+        meta = {
+            "channel_ids": np.array(list("abcd")),
+            "gain_to_uV": TestEncoding.GAIN,
+            "offset_to_uV": TestEncoding.OFFSET,
+        }
+        assert self._units(self._build(tmp_path, TestEncoding()._source(), source_metadata=meta)) == "uV"
+
+    def test_units_contradicting_gain_is_rejected_before_writing(self, tmp_path):
+        meta = {
+            "channel_ids": np.array(list("abcd")),
+            "gain_to_uV": TestEncoding.GAIN,
+            "offset_to_uV": TestEncoding.OFFSET,
+        }
+        with pytest.raises(ValueError, match="mislabel"):
+            self._build(tmp_path, TestEncoding()._source(), source_metadata=meta, units="counts")
+        assert not (tmp_path / "units.zarr").exists()
+
+    def test_float_source_without_gain_needs_units(self, tmp_path):
+        source = TestEncoding()._source().astype(np.float32)
+        with pytest.raises(ValueError, match="units is required"):
+            self._build(tmp_path, source)
+        assert self._units(self._build(tmp_path, source, units="mV")) == "mV"
+
+    def test_add_pyramid_over_integer_raw_decodes_to_counts(self, tmp_path):
+        raw = self._build(tmp_path, TestEncoding()._source(), encoding=LOSSLESS_ENCODING)
+        pyramid = tmp_path / "pyr.zarr"
+        add_pyramid(raw, pyramid, config=self.CFG)
+        assert self._units(pyramid) == "counts"
+
+
+class TestFormatVersion:
+    def test_store_records_format_version(self, tmp_path):
+        out = TestUnits()._build(tmp_path, TestEncoding()._source())
+        assert zarr.open_group(str(out), mode="r", use_consolidated=None).attrs["format_version"] == FORMAT_VERSION
+
+    def test_store_without_version_reads_as_version_1(self, tmp_path):
+        from ecephys_mipmap_zarr.read import open_mipmap
+
+        out = TestUnits()._build(tmp_path, TestEncoding()._source())
+        root = zarr.open_group(str(out), mode="r+", use_consolidated=False)
+        del root.attrs["format_version"]
+        zarr.consolidate_metadata(str(out))
+        assert open_mipmap(out)._attrs.format_version == 1
+
+    def test_reader_refuses_newer_version(self, tmp_path):
+        from ecephys_mipmap_zarr.read import open_mipmap
+
+        out = TestUnits()._build(tmp_path, TestEncoding()._source())
+        root = zarr.open_group(str(out), mode="r+", use_consolidated=False)
+        root.attrs["format_version"] = FORMAT_VERSION + 1
+        zarr.consolidate_metadata(str(out))
+        with pytest.raises(ValueError, match="newer than this reader"):
+            open_mipmap(out)

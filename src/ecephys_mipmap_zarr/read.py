@@ -41,6 +41,7 @@ import zarr
 
 from ecephys_mipmap_zarr._store import _default_cache_dir, _find_raw_array, _open_store
 from ecephys_mipmap_zarr.metadata import (
+    FORMAT_VERSION,
     LevelQuantization,
     MipmapAttrs,
     RawQuantization,
@@ -183,6 +184,9 @@ class MipmapStore:
         attrs: MipmapAttrs,
         raw_group: zarr.Group | None = None,
     ) -> None:
+        if attrs.format_version > FORMAT_VERSION:
+            msg = f"store format version {attrs.format_version} is newer than this reader's {FORMAT_VERSION}"
+            raise ValueError(msg)
         self._root = root
         self._attrs = attrs
 

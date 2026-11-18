@@ -36,10 +36,13 @@ from ecephys_mipmap_zarr._store import (
     _extract_source_metadata,
     _extract_t_start,
     _find_raw_array,
+    _metadata_gain_offset,
     _open_store,
+    _read_gain_offset,
     _write_source_metadata_dict,
 )
 from ecephys_mipmap_zarr.metadata import (
+    COUNTS_UNITS,
     DEFAULT_BUILD_CONFIG,
     DEFAULT_ENCODING_CONFIG,
     BuildConfig,
@@ -58,6 +61,21 @@ __all__ = [
 _log = logging.getLogger(__name__)
 
 
+def _resolve_units(units: str | None, *, calibrated: bool, source_dtype: str) -> str:
+    """Return the units stored values decode to, refusing a stated unit the encoding contradicts."""
+    if calibrated:
+        if units not in (None, "uV"):
+            msg = f"values decode to uV through the source's gain_to_uV, so units={units!r} would mislabel them"
+            raise ValueError(msg)
+        return "uV"
+    if units is not None:
+        return units
+    if np.issubdtype(np.dtype(source_dtype), np.integer):
+        return COUNTS_UNITS
+    msg = "units is required for a float source with no gain_to_uV"
+    raise ValueError(msg)
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -73,7 +91,7 @@ def build_mipmap(
     output: str | Path,
     *,
     sampling_frequency: float,
-    units: str,
+    units: str | None = None,
     dtype: str | None = None,
     config: BuildConfig = DEFAULT_BUILD_CONFIG,
     encoding: EncodingConfig = DEFAULT_ENCODING_CONFIG,
@@ -98,8 +116,11 @@ def build_mipmap(
         Filesystem path for the new Zarr v3 store.
     sampling_frequency : float
         Sampling rate in Hz.
-    units : str
-        Physical units of the data (e.g. ``"uV"``).
+    units : str or None, optional
+        Units the stored values decode to. By default ``"uV"`` when an ADC gain
+        is composed in, ``"counts"`` for an integer source without one, and
+        required for a float source without one. A value contradicting a
+        composed gain is an error.
     dtype : str or None, optional
         Dtype of *source*'s values, by default ``source.dtype``. The stored
         dtype follows from *encoding*.
@@ -149,6 +170,13 @@ def build_mipmap(
         msg = f"Recording too short ({n_samples} samples) for any pyramid level"
         raise ValueError(msg)
 
+    meta_root = _open_store(metadata_from, mode="r") if metadata_from is not None else None
+    if meta_root is not None:
+        calibrated = _read_gain_offset(meta_root) is not None
+    else:
+        calibrated = source_metadata is not None and _metadata_gain_offset(source_metadata) is not None
+    resolved_units = _resolve_units(units, calibrated=calibrated, source_dtype=source_dtype)
+
     plan = _resolve_encoding(encoding, source=source, source_dtype=source_dtype, sampling_frequency=sampling_frequency)
     root = zarr.open_group(str(output), mode="w", zarr_format=3)
     _write_encoded(
@@ -169,8 +197,7 @@ def build_mipmap(
 
     attrs_source_metadata: dict[str, Any] | None = None
     t_start: float | None = None
-    if metadata_from is not None:
-        meta_root = _open_store(metadata_from, mode="r")
+    if meta_root is not None:
         attrs_source_metadata = _extract_source_metadata(meta_root)
         t_start = _extract_t_start(meta_root)
         _copy_source_arrays(meta_root, root)
@@ -189,7 +216,7 @@ def build_mipmap(
     # Set root attributes
     attrs = MipmapAttrs(
         sampling_frequency=sampling_frequency,
-        units=units,
+        units=resolved_units,
         strides=strides,
         n_samples=n_samples,
         n_channels=n_channels,
@@ -208,7 +235,7 @@ def add_pyramid(
     output: str | Path,
     *,
     sampling_frequency: float | None = None,
-    units: str = "uV",
+    units: str | None = None,
     raw_path: str = "raw",
     config: BuildConfig = DEFAULT_BUILD_CONFIG,
     encoding: EncodingConfig = DEFAULT_ENCODING_CONFIG,
@@ -229,8 +256,9 @@ def add_pyramid(
     sampling_frequency : float or None, optional
         Sampling rate in Hz.  If ``None``, auto-detected from store
         attributes.
-    units : str, optional
-        Physical units of the data (e.g. ``"uV"``), by default ``"uV"``.
+    units : str or None, optional
+        Units the stored values decode to; by default ``"counts"`` for an
+        integer raw array, and required for a float one.
     raw_path : str, optional
         Path to the raw array within *raw_store*, by default ``"raw"``.
         Override for stores with non-standard layouts.
@@ -265,6 +293,7 @@ def add_pyramid(
         msg = f"Recording too short ({n_samples} samples) for any pyramid level"
         raise ValueError(msg)
 
+    resolved_units = _resolve_units(units, calibrated=False, source_dtype=raw_dtype)
     plan = _resolve_encoding(
         encoding, source=source, source_dtype=raw_dtype, sampling_frequency=sampling_frequency, writes_raw=False
     )
@@ -295,7 +324,7 @@ def add_pyramid(
     # Set root attributes with raw_source
     attrs = MipmapAttrs(
         sampling_frequency=sampling_frequency,
-        units=units,
+        units=resolved_units,
         strides=strides,
         n_samples=n_samples,
         n_channels=n_channels,
@@ -316,7 +345,7 @@ def ensure_pyramid(
     output: str | Path,
     *,
     sampling_frequency: float | None = None,
-    units: str = "uV",
+    units: str | None = None,
     raw_path: str = "raw",
     config: BuildConfig = DEFAULT_BUILD_CONFIG,
     encoding: EncodingConfig = DEFAULT_ENCODING_CONFIG,
@@ -336,8 +365,8 @@ def ensure_pyramid(
     sampling_frequency : float or None, optional
         Sampling rate in Hz.  If ``None``, auto-detected from store
         attributes.
-    units : str, optional
-        Physical units of the data (e.g. ``"uV"``), by default ``"uV"``.
+    units : str or None, optional
+        As for :func:`add_pyramid`.
     raw_path : str, optional
         Path to the raw array within *raw_store*, by default ``"raw"``.
     config : BuildConfig, optional
