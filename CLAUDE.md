@@ -22,7 +22,7 @@ Core dependencies: zarr, numpy, dask.
 - **Raw array**: `(channels, samples)` — channel-first, one channel's time series is contiguous in memory. 4-9% better compression than (T,C), faster writes.
 - **Pyramid arrays**: `(channels, 2, n_blocks)` — axis 1 is `[min, max]`, time-like axis last, dtype defaults to raw dtype
 - **Source data is (T, C)**: builder transposes internally. SI zarrs and `.cbin` files are (T, C) — the transpose happens at write time.
-- **Root attrs** (`MipmapAttrs`): sampling_frequency, units, strides, n_samples, n_channels, dtype, t_start
+- **Root attrs** (`MipmapAttrs`): sampling_frequency, units, strides, n_samples, n_channels, dtype, raw_source, raw_path, source_metadata, t_start, format_version. `units` is what values decode to: "uV" with an ADC gain, "counts" for integer sources without one.
 
 ### SpikeInterface zarr v2 layout (source data)
 
@@ -186,7 +186,7 @@ A high-confidence single unit has: KS=good, decoder=sua, default_qc=True.
 
 `get_window(t0, t1, channels, num_points)` — the core read/tile function:
 - Estimates samples-per-point from the time range and num_points
-- Picks the coarsest pyramid level that still oversamples (~4× points)
+- Picks the coarsest pyramid level that still oversamples (at least 2 blocks per point)
 - Falls back to raw data when zoomed in past the finest pyramid level
 - Returns `WindowResult(data, stride, t0_actual, t1_actual)` — data is `(C, T)` for raw or `(C, 2, B)` for minmax
 

@@ -646,7 +646,7 @@ def select_level(
     oversample : float, optional
         Minimum oversampling factor.  A stride is acceptable if
         ``samples_per_pixel / stride >= oversample``, meaning each pixel
-        has at least *oversample* mipmap blocks contributing.  Default 4.0.
+        has at least *oversample* mipmap blocks contributing.  Default 2.0.
 
     Returns
     -------

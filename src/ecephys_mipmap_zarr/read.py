@@ -425,7 +425,7 @@ class MipmapStore:
         num_points : int, optional
             Desired number of data points per channel for this window.
             The returned data will have at least this many points
-            (oversampled by ~4x at the chosen pyramid level).  Defaults
+            (oversampled by at least 2x at the chosen pyramid level).  Defaults
             to 1920.
         dequantize : bool, optional
             If ``True`` (default), apply dequantization or LSB-shift
