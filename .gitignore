@@ -143,3 +143,6 @@ dmypy.json
 
 # Claude
 .claude/
+
+# Cross-reader fixtures, rebuilt by scripts/make_fixtures.py
+viewer-web/test/fixtures/
