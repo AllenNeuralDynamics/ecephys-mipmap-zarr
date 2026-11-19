@@ -11,6 +11,7 @@ export default tseslint.config(
       globals: { ...globals.browser, ...globals.node },
       parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
     },
+    rules: { "@typescript-eslint/no-unused-vars": ["error", { ignoreRestSiblings: true }] },
   },
   { files: ["eslint.config.js"], ...tseslint.configs.disableTypeChecked },
 );
