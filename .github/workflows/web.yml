@@ -1,0 +1,39 @@
+name: Web
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["viewer-web/**", "scripts/make_fixtures.py", "src/**", ".github/workflows/web.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["viewer-web/**", "scripts/make_fixtures.py", "src/**", ".github/workflows/web.yml"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: viewer-web
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: viewer-web/package-lock.json
+      - run: uv sync
+      - run: npm ci
+      - run: npm run fixtures
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
