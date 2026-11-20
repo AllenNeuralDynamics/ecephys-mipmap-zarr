@@ -13,3 +13,13 @@ export {
   type StoreInfo,
 } from "./reader/store.js";
 export { channelFirstCodes, decodeTile, DEFAULT_CACHE_BYTES, TileSource, type Tile } from "./reader/tiles.js";
+export {
+  defineMipmapViewer,
+  depthOrder,
+  MipmapViewer,
+  type ChannelClickDetail,
+  type ChannelOrder,
+  type ViewChangeDetail,
+} from "./element/mipmap-viewer.js";
+export { Renderer, type RendererOptions, type TileProvider } from "./render/renderer.js";
+export { clampView, panBy, visibleSamples, zoomAbout, type View } from "./render/view.js";
