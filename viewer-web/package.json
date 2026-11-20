@@ -15,6 +15,7 @@
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "vitest run",
+    "e2e": "playwright test",
     "fixtures": "cd .. && uv run python -I scripts/make_fixtures.py"
   },
   "dependencies": {
