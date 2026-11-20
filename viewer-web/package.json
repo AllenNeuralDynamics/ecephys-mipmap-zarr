@@ -9,6 +9,7 @@
     "node": ">=22.12"
   },
   "scripts": {
+    "dev": "vite --open /src/app/index.html",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . && prettier --check .",

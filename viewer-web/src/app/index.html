@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mipmap Viewer</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #fbfbfc;
+        font:
+          13px system-ui,
+          sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      form {
+        display: flex;
+        gap: 8px;
+        padding: 8px 16px;
+      }
+      form input {
+        flex: 1;
+        min-width: 0;
+      }
+      mipmap-viewer {
+        flex: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <form id="picker">
+      <input id="store" name="store" placeholder="Store URL (https://… or s3://…)" />
+      <button type="submit">Open</button>
+    </form>
+    <mipmap-viewer id="viewer"></mipmap-viewer>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
