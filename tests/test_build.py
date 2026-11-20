@@ -1308,6 +1308,61 @@ class TestEncoding:
         assert s32_shift(pyramid) == s32_shift(built)
 
 
+class TestDefaultEncoding:
+    """Pin what a build with no encoding settings writes, so a change to the defaults is deliberate.
+
+    The defaults follow the bit-depth analysis in CLAUDE.md: integer ADC counts lose their noise LSBs and fit
+    int8 (pyramids 2 bits more), and only float sources, which have no counts to shift, are range-fit.
+    """
+
+    CFG = TestEncoding()._cfg()
+    NOISE_COUNTS = 4.0
+
+    def _counts(self):
+        rng = np.random.default_rng(7)
+        counts = np.round(rng.normal(0, self.NOISE_COUNTS, size=(300_000, 4))).astype(np.int16)
+        counts[5_000::20_011] -= 150
+        return counts
+
+    def _build(self, tmp_path, source, metadata=None):
+        out = tmp_path / "default.zarr"
+        build_mipmap(source, out, sampling_frequency=30000.0, units="uV", config=self.CFG, source_metadata=metadata)
+        root = zarr.open_group(str(out), mode="r", use_consolidated=None)
+        levels = [root[f"minmax/{k}"] for k in root["minmax"].array_keys()]
+        assert len(levels) >= 2
+        return root["raw"], levels
+
+    def test_integer_source_is_shifted_to_int8(self, tmp_path):
+        raw, levels = self._build(tmp_path, self._counts())
+        assert (raw.dtype, dict(raw.attrs).get("lsb_shift"), "quantization" in raw.attrs) == (np.int8, 2, False)
+        for level in levels:
+            assert (level.dtype, dict(level.attrs).get("lsb_shift"), "quantization" in level.attrs) == (
+                np.int8,
+                4,
+                False,
+            ), level.path
+
+    def test_integer_source_with_gain_stays_int8(self, tmp_path):
+        gain = np.full(4, 2.925)
+        meta = {"channel_ids": np.array(list("abcd")), "gain_to_uV": gain, "offset_to_uV": np.zeros(4)}
+        raw, levels = self._build(tmp_path, self._counts(), meta)
+        assert raw.dtype == np.int8
+        np.testing.assert_allclose(dict(raw.attrs)["quantization"]["scale"], gain * 2**2)
+        for level in levels:
+            assert level.dtype == np.int8, level.path
+            np.testing.assert_allclose(dict(level.attrs)["quantization"]["scale"], gain * 2**4)
+
+    def test_float_source_is_range_fit(self, tmp_path):
+        raw, levels = self._build(tmp_path, self._counts().astype(np.float32) * 2.925)
+        assert (raw.dtype, "lsb_shift" in raw.attrs, "quantization" in raw.attrs) == (np.uint16, False, True)
+        for level in levels:
+            assert (level.dtype, "lsb_shift" in level.attrs, "quantization" in level.attrs) == (
+                np.uint8,
+                False,
+                True,
+            ), level.path
+
+
 class TestUnits:
     CFG = TestEncoding()._cfg()
 
