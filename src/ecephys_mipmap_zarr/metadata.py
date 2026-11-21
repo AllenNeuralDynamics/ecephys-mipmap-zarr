@@ -232,7 +232,9 @@ class EncodingConfig:
         only drawn, get 2 bits more than that.
     noise_floor : float or None
         Noise floor in source units RMS for ``"auto"``. ``None`` measures it in
-        the 10-14 kHz band, which needs a sampling rate above 28 kHz.
+        the 10-14 kHz band, which needs a sampling rate above 28 kHz and a
+        source that was not low-passed; for a SpikeInterface chain, see
+        :func:`~ecephys_mipmap_zarr.preprocess.chain_noise_floor`.
     clip_outliers : bool
         After shifting, clip values outside int8 when they are under 0.01% of
         the array, rather than keeping int16.
@@ -255,6 +257,13 @@ class EncodingConfig:
     # RawQuantization / LevelQuantization, defined below
     raw_quantization: Any = None
     level_quantization: Any = None
+
+    def measures_noise(self, source_dtype: Any) -> bool:
+        """Whether a build of a ``source_dtype`` source would measure the noise floor itself."""
+        default = "shift" if np.issubdtype(np.dtype(source_dtype), np.integer) else "range"
+        pairs = ((self.raw, self.raw_shift), (self.pyramids, self.pyramid_shift))
+        auto = any((kind or default) == "shift" and bits == "auto" for kind, bits in pairs)
+        return auto and self.noise_floor is None
 
 
 DEFAULT_ENCODING_CONFIG: EncodingConfig = EncodingConfig()
@@ -830,6 +839,55 @@ def estimate_hf_noise(data: npt.NDArray[Any], fs: float = 30000.0) -> float:
         per_channel_noise[ch] = math.sqrt(hf_psd * full_bw * 2.0 / fs)
 
     return float(np.median(per_channel_noise))
+
+
+SPIKE_BAND_HZ: tuple[float, float] = (300.0, 6000.0)
+"""Band where spike power lies, against which :func:`hf_band_fraction` compares the noise band."""
+
+BAND_LIMITED_FRACTION = 0.05
+"""Below this :func:`hf_band_fraction` a source has been low-passed and its noise band is empty."""
+
+
+def _welch_psd(data: npt.NDArray[Any], fs: float, nperseg: int = 4096) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
+    """Hann-windowed, segment-averaged power spectral density of ``(C, T)`` data, per Hz."""
+    n_samples = data.shape[1]
+    nperseg = min(nperseg, n_samples)
+    window = np.hanning(nperseg)
+    starts = range(0, n_samples - nperseg + 1, nperseg // 2)
+    psd = np.zeros((data.shape[0], nperseg // 2 + 1))
+    for start in starts:
+        segment = data[:, start : start + nperseg].astype(np.float64)
+        segment -= segment.mean(axis=1, keepdims=True)
+        psd += np.abs(np.fft.rfft(segment * window, axis=1)) ** 2
+    psd *= 2.0 / (fs * float(np.sum(window**2)) * len(starts))
+    return np.fft.rfftfreq(nperseg, 1.0 / fs), psd
+
+
+def _band(freqs: npt.NDArray[Any], band: tuple[float, float]) -> npt.NDArray[np.bool_]:
+    return (freqs >= band[0]) & (freqs < band[1])
+
+
+def hf_band_fraction(data: npt.NDArray[Any], fs: float) -> float:
+    """Power density in the noise band as a fraction of that in the spike band.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        ``(C, T)`` source samples.
+    fs : float
+        Sampling rate in Hz.
+
+    Returns
+    -------
+    float
+        Median across live channels; under :data:`BAND_LIMITED_FRACTION` the
+        source was low-passed and :func:`estimate_hf_noise` reads near zero.
+    """
+    freqs, psd = _welch_psd(data, fs)
+    spike = psd[:, _band(freqs, SPIKE_BAND_HZ)].mean(axis=1)
+    noise = psd[:, _band(freqs, HF_NOISE_BAND_HZ)].mean(axis=1)
+    live = spike > 0
+    return float(np.median(noise[live] / spike[live])) if np.any(live) else 0.0
 
 
 def compute_optimal_lsb_shift(

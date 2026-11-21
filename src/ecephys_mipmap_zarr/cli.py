@@ -14,6 +14,7 @@ Usage::
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -298,7 +299,7 @@ class BuildSettings:
     pyramid_shift: int | str = "auto"
     """Bits the pyramid shift drops: 'auto' (2 more than the noise allows for raw) or an integer."""
     noise_floor: float | None = None
-    """Noise floor in source units RMS for 'auto' shifts (default: measured at 10-14 kHz)."""
+    """Noise floor in source units RMS for 'auto' shifts (default: 10-14 kHz, before any --from-analyzer chain)."""
     clip_outliers: bool = True
     """After shifting, clip values outside int8 when under 0.01%% of them, rather than keep int16."""
     prefetch_chunks: int = -1
@@ -313,6 +314,8 @@ class BuildSettings:
         source: Any
         input_path = Path(self.input)
         built_source_metadata: dict[str, Any] | None = None
+        chain: Any = None
+        chain_start = 0
 
         if self.from_analyzer:
             if self.raw_path_override is None:
@@ -345,6 +348,7 @@ class BuildSettings:
                 full_samples,
             )
             source = SIRecordingSource(rec, start_sample=start_sample, n_samples=capped_n_samples)
+            chain, chain_start = rec, start_sample
             built_source_metadata = build_source_metadata(rec)
             dtype = str(rec.get_dtype())
             n_samples, n_channels = source.shape
@@ -436,6 +440,11 @@ class BuildSettings:
             noise_floor=self.noise_floor,
             clip_outliers=self.clip_outliers,
         )
+        if chain is not None and encoding.measures_noise(dtype):
+            from ecephys_mipmap_zarr.preprocess import chain_noise_floor
+
+            encoding = dataclasses.replace(encoding, noise_floor=chain_noise_floor(chain, chain_start))
+            console.print(f"  noise floor {encoding.noise_floor:.3f} RMS, measured before the chain")
         with _progress_bar() as progress_fn, _scipy_fft_workers(self.fft_workers):
             build_mipmap(
                 source,

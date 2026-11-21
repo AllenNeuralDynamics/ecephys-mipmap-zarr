@@ -21,6 +21,7 @@ from zarr.codecs import BloscCodec, GzipCodec, ZstdCodec
 from zarr.codecs.blosc import BloscCname, BloscShuffle
 
 from ecephys_mipmap_zarr.metadata import (
+    BAND_LIMITED_FRACTION,
     HF_NOISE_BAND_HZ,
     ChunkConfig,
     Encoding,
@@ -30,6 +31,7 @@ from ecephys_mipmap_zarr.metadata import (
     compute_entropy,
     compute_quantization_params,
     estimate_hf_noise,
+    hf_band_fraction,
     lsb_shift_for_noise,
     minmax_path,
     n_blocks,
@@ -163,7 +165,16 @@ def _resolve_encoding(
             )
             raise ValueError(msg)
         n = min(_SAMPLE_SAMPLES, source.shape[0])
-        noise_floor = estimate_hf_noise(_read_channels_first(source, 0, n), sampling_frequency)
+        sample = _read_channels_first(source, 0, n)
+        fraction = hf_band_fraction(sample, sampling_frequency)
+        if fraction < BAND_LIMITED_FRACTION:
+            msg = (
+                f"an 'auto' shift measures noise in {HF_NOISE_BAND_HZ[0]:g}-{band_top:g} Hz, where this source "
+                f"has {fraction:.2g} of its spike-band power, so it was low-passed; give a noise_floor "
+                "measured before the filter (preprocess.chain_noise_floor) or the shift in bits"
+            )
+            raise ValueError(msg)
+        noise_floor = estimate_hf_noise(sample, sampling_frequency)
 
     def bits(shift: int | str, auto: bool, extra: int) -> int:
         if auto:

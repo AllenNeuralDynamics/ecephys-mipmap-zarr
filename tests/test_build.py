@@ -1256,6 +1256,21 @@ class TestEncoding:
         with pytest.raises(ValueError, match="Nyquist"):
             self._build(tmp_path, EncodingConfig(), fs=2500.0)
 
+    def _low_passed(self):
+        """Noise with nothing above 6 kHz, like a source that went through a bandpass."""
+        source = self._source().astype(np.float64)
+        spectrum = np.fft.rfft(source, axis=0)
+        spectrum[np.fft.rfftfreq(len(source), 1 / 30000.0) > 6000] = 0
+        return np.round(np.fft.irfft(spectrum, n=len(source), axis=0)).astype(np.int16)
+
+    def test_auto_shift_refuses_low_passed_source(self, tmp_path):
+        with pytest.raises(ValueError, match="low-passed"):
+            self._build(tmp_path, EncodingConfig(), source=self._low_passed())
+
+    def test_low_passed_source_shifts_by_given_noise_floor(self, tmp_path):
+        _, out = self._build(tmp_path, EncodingConfig(noise_floor=4.0), source=self._low_passed())
+        assert dict(zarr.open_group(str(out), mode="r", use_consolidated=None)["raw"].attrs)["lsb_shift"] == 2
+
     @pytest.mark.parametrize(
         "encoding",
         [EncodingConfig(raw_shift=1, pyramid_shift=3), EncodingConfig(noise_floor=4.0)],

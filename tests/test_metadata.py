@@ -8,6 +8,7 @@ import pytest
 from ecephys_mipmap_zarr.metadata import (
     DEFAULT_CHUNK_CONFIG,
     ChunkConfig,
+    EncodingConfig,
     LevelQuantization,
     MipmapAttrs,
     RawQuantization,
@@ -507,6 +508,39 @@ class TestEstimateHfNoise:
         data = rng.integers(-100, 100, size=(4, 30000), dtype=np.int16)
         est = estimate_hf_noise(data.astype(np.float64), fs=30000.0)
         assert est > 0
+
+
+def _low_pass(data, fs, top):
+    spectrum = np.fft.rfft(data, axis=1)
+    spectrum[:, np.fft.rfftfreq(data.shape[1], 1 / fs) > top] = 0
+    return np.fft.irfft(spectrum, n=data.shape[1], axis=1)
+
+
+class TestNoiseBand:
+    FS = 30000.0
+
+    def _white(self, sigma=4.0):
+        return np.random.default_rng(3).standard_normal((8, 120_000)) * sigma
+
+    def test_band_fraction_separates_low_passed(self):
+        from ecephys_mipmap_zarr.metadata import BAND_LIMITED_FRACTION, hf_band_fraction
+
+        white = self._white()
+        assert hf_band_fraction(white, self.FS) == pytest.approx(1.0, abs=0.1)
+        assert hf_band_fraction(_low_pass(white, self.FS, 6000), self.FS) < BAND_LIMITED_FRACTION
+
+    @pytest.mark.parametrize(
+        ("encoding", "dtype", "measures"),
+        [
+            (EncodingConfig(), "int16", True),
+            (EncodingConfig(), "float32", False),
+            (EncodingConfig(raw_shift=2, pyramid_shift=4), "int16", False),
+            (EncodingConfig(raw="range"), "int16", True),
+            (EncodingConfig(noise_floor=4.0), "int16", False),
+        ],
+    )
+    def test_measures_noise_only_for_an_auto_shift(self, encoding, dtype, measures):
+        assert encoding.measures_noise(dtype) is measures
 
 
 class TestComputeOptimalLsbShift:

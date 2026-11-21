@@ -374,3 +374,66 @@ def test_build_source_metadata_without_a_probe_has_no_locations():
 
     rec = si.NumpyRecording([np.zeros((10, 4), dtype="int16")], sampling_frequency=30_000.0)
     assert "location" not in build_source_metadata(rec)["properties"]
+
+
+class TestChainNoise:
+    """White noise of known RMS through real SpikeInterface chains."""
+
+    FS = 30000.0
+    SIGMA = 8.0
+
+    def _root(self, n_channels=16, seconds=12):
+        sc = pytest.importorskip("spikeinterface.core")
+        rng = np.random.default_rng(1)
+        traces = rng.standard_normal((int(seconds * self.FS), n_channels)) * self.SIGMA
+        root = sc.NumpyRecording(
+            np.round(traces).astype(np.int16), self.FS, channel_ids=[f"CH{i}" for i in range(n_channels)]
+        )
+        root.set_property("inter_sample_shift", np.linspace(0, 0.9, n_channels))
+        return root
+
+    def _bandpassed(self, root):
+        import spikeinterface.preprocessing as spre
+
+        chain = spre.bandpass_filter(spre.phase_shift(root), 300, 6000, dtype="float32")
+        chain = chain.select_channels(chain.channel_ids[2:])
+        return spre.common_reference(chain, operator="median")
+
+    def test_unfiltered_chain_passes_noise_whole(self):
+        from ecephys_mipmap_zarr.preprocess import chain_noise_gain
+
+        root = self._root()
+        assert chain_noise_gain(root) == 1.0
+        assert chain_noise_gain(root.select_channels(root.channel_ids[3:])) == pytest.approx(1.0, rel=0.02)
+
+    def _measured_gain(self, root, chain):
+        n = int(self.FS)
+        out = np.asarray(chain.get_traces(start_frame=n, end_frame=len(root.get_traces()) - n), dtype=np.float64)
+        return float(np.median(out.std(axis=0))) / self.SIGMA
+
+    def test_gain_is_the_chains_own_response_to_white_noise(self):
+        from ecephys_mipmap_zarr.preprocess import chain_noise_gain
+
+        root = self._root()
+        chain = self._bandpassed(root)
+        assert chain_noise_gain(chain) == pytest.approx(self._measured_gain(root, chain), rel=0.03)
+
+    def test_noise_floor_is_the_root_noise_through_the_chain(self):
+        from ecephys_mipmap_zarr.preprocess import chain_noise_floor
+
+        root = self._root()
+        chain = self._bandpassed(root)
+        assert chain_noise_floor(chain) == pytest.approx(self.SIGMA * self._measured_gain(root, chain), rel=0.05)
+
+    def test_refuses_a_low_passed_root(self):
+        import spikeinterface.core as sc
+        import spikeinterface.preprocessing as spre
+
+        from ecephys_mipmap_zarr.preprocess import chain_noise_floor
+
+        traces = self._root().get_traces().astype(np.float64)
+        spectrum = np.fft.rfft(traces, axis=0)
+        spectrum[np.fft.rfftfreq(len(traces), 1 / self.FS) > 6000] = 0
+        low_passed = sc.NumpyRecording(np.fft.irfft(spectrum, n=len(traces), axis=0).astype(np.float32), self.FS)
+        with pytest.raises(ValueError, match="low-passed"):
+            chain_noise_floor(spre.highpass_filter(low_passed, 300))

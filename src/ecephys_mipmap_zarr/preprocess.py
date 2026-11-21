@@ -43,6 +43,8 @@ if TYPE_CHECKING:
 __all__ = [
     "SIRecordingSource",
     "build_source_metadata",
+    "chain_noise_floor",
+    "chain_noise_gain",
     "load_preprocessed_recording",
 ]
 
@@ -411,6 +413,113 @@ def _chain_step_names(rec: BaseRecording) -> list[str]:
         names.append(type(node).__name__)
         node = node._kwargs.get("recording")
     return names[::-1]
+
+
+def _chain_root(rec: Any) -> Any:
+    """Return the recording at the bottom of *rec*'s chain, the one every step reads from."""
+    node = rec
+    while getattr(node, "_parent", None) is not None:
+        node = node._parent
+    return node
+
+
+def _replace_root(d: dict[str, Any], root: dict[str, Any]) -> None:
+    for key in ("recording", "parent_recording"):
+        child = d.get("kwargs", {}).get(key)
+        if isinstance(child, dict) and "class" in child:
+            if any(isinstance(c, dict) and "class" in c for c in child.get("kwargs", {}).values()):
+                _replace_root(child, root)
+            else:
+                d["kwargs"][key] = root
+            return
+    msg = f"{d.get('class')} has no recording to replace"
+    raise ValueError(msg)
+
+
+def chain_noise_gain(rec: BaseRecording, seconds: float = 1.0, sigma: float = 1000.0) -> float:
+    """RMS gain of *rec*'s chain for noise independent across channels.
+
+    Rebuilds the chain on white noise of RMS *sigma* in place of its root, so
+    every step (filter, phase shift, CMR, fused or patched) acts as it does
+    on the recording; *sigma* is large enough that integer steps round off
+    nothing that matters.
+
+    Parameters
+    ----------
+    rec : BaseRecording
+        Preprocessing chain over a raw recording.
+    seconds : float, optional
+        Length of noise measured, from the middle of three times as much so
+        filter edges stay out.
+    sigma : float, optional
+        Noise RMS, in root units.
+
+    Returns
+    -------
+    float
+        Median across output channels of output RMS over *sigma*.
+    """
+    import spikeinterface as si
+    from spikeinterface.core import NumpyRecording
+
+    root = _chain_root(rec)
+    if root is rec:
+        return 1.0
+    fs = float(root.get_sampling_frequency())
+    n = int(seconds * fs)
+    rng = np.random.default_rng(0)
+    noise = rng.standard_normal((3 * n, root.get_num_channels())) * sigma
+    probe = NumpyRecording(noise.astype(root.get_dtype()), fs, channel_ids=root.channel_ids)
+    for key in root.get_property_keys():
+        probe.set_property(key, root.get_property(key))
+    probe_dict = probe.to_dict(include_annotations=True, include_properties=True, recursive=True)
+    # NumpyRecording's kwargs leave out channel_ids, and channel slices above need them
+    probe_dict["kwargs"]["channel_ids"] = list(root.channel_ids)
+    chain = rec.to_dict(include_annotations=True, include_properties=True, recursive=True)
+    _replace_root(chain, probe_dict)
+    probed: BaseRecording = si.load(chain)
+    out = np.asarray(probed.get_traces(start_frame=n, end_frame=2 * n), dtype=np.float64)
+    return float(np.median(out.std(axis=0)) / sigma)
+
+
+def chain_noise_floor(rec: BaseRecording, start_frame: int = 0, seconds: float = 10.0) -> float:
+    """Instrument noise RMS in *rec*'s output, for an ``"auto"`` shift's ``noise_floor``.
+
+    A chain that low-passes leaves nothing in the band
+    :func:`~ecephys_mipmap_zarr.metadata.estimate_hf_noise` reads, and its
+    spike band holds neural background as well as noise, so the noise is
+    measured on the chain's raw root and scaled by :func:`chain_noise_gain`.
+
+    Parameters
+    ----------
+    rec : BaseRecording
+        Preprocessing chain over a raw recording.
+    start_frame : int, optional
+        First root sample measured.
+    seconds : float, optional
+        Length measured; a chain near a shift boundary needs several seconds.
+
+    Returns
+    -------
+    float
+        Noise RMS in *rec*'s units.
+
+    Raises
+    ------
+    ValueError
+        If the root itself was low-passed, so it has no noise band either.
+    """
+    from ecephys_mipmap_zarr.metadata import BAND_LIMITED_FRACTION, estimate_hf_noise, hf_band_fraction
+
+    root = _chain_root(rec)
+    fs = float(root.get_sampling_frequency())
+    end = min(start_frame + int(seconds * fs), int(root.get_num_samples()))
+    raw = np.asarray(root.get_traces(start_frame=start_frame, end_frame=end, channel_ids=rec.channel_ids)).T
+    fraction = hf_band_fraction(raw, fs)
+    if fraction < BAND_LIMITED_FRACTION:
+        msg = f"the chain's root has {fraction:.2g} of its spike-band power in the noise band, so it was low-passed"
+        raise ValueError(msg)
+    return estimate_hf_noise(raw, fs) * chain_noise_gain(rec)
 
 
 class SIRecordingSource:
