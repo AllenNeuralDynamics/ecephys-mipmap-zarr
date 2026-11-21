@@ -32,12 +32,13 @@ async function render(
   channels: number[],
   range: [number, number],
   widthPx: number,
+  slotsPerExcursion = 1 / 2.1,
 ): Promise<Drawn> {
   const excursion = await fullRange(store, channels);
   await page.goto("/test/e2e/page.html");
   await page.waitForFunction(() => (window as unknown as { viewerReady?: boolean }).viewerReady === true);
   return page.evaluate(
-    async ({ store, channels, range, widthPx, fs, excursion }) => {
+    async ({ store, channels, range, widthPx, fs, excursion, slotsPerExcursion }) => {
       const viewer = document.querySelector("mipmap-viewer");
       if (viewer === null) throw new Error("no viewer");
       viewer.style.width = `${String(widthPx)}px`;
@@ -45,8 +46,8 @@ async function render(
       viewer.store = store;
       await viewer.ready;
       await viewer.idle();
-      // Scale so a channel's whole range, and so any excursion from its centre, fits in half a slot.
-      viewer.gain = (viewer.unitRange ?? 1) / (2.1 * excursion);
+      // Scale a channel's whole range to `slotsPerExcursion` slots; under half a slot, nothing reaches the next.
+      viewer.gain = ((viewer.unitRange ?? 1) * slotsPerExcursion) / excursion;
       viewer.timeRange = [range[0] / fs, range[1] / fs];
       await viewer.idle();
       const shot = viewer.snapshot();
@@ -75,7 +76,7 @@ async function render(
         layout: { ...layout, centres: Array.from(layout.centres), displayed: [...layout.displayed] },
       };
     },
-    { store: `/test/fixtures/${store}.zarr`, channels, range, widthPx, fs: FS, excursion },
+    { store: `/test/fixtures/${store}.zarr`, channels, range, widthPx, fs: FS, excursion, slotsPerExcursion },
   );
 }
 
@@ -193,3 +194,19 @@ test("the spike lands in its channel's slot at its sample's column", async ({ pa
   const depth = (slot: number): number => Math.max(...(drawn.bottom[slot] ?? [])) - (slot + 0.5) * drawn.layout.slotPx;
   expect(depth(1)).toBeLessThan(depth(0) / 3);
 });
+
+for (const [name, halfWidth] of [
+  ["raw", 200],
+  ["s32", 40_000],
+] as const) {
+  test(`a spike taller than its slot is clipped there at ${name}`, async ({ page }) => {
+    const channel = 5;
+    const range: [number, number] = [spikeAt(channel) - halfWidth, spikeAt(channel) + halfWidth];
+    const drawn = await render(page, "int16_raw-none_pyr-none", [channel, 2], range, 800, 1.5);
+    const { view, slotPx } = drawn.layout;
+    const column = Math.floor((spikeAt(channel) + 0.5 - view.t0) / view.samplesPerPx);
+    // The spike reaches the bottom of its own slot, and the channel below shows only itself there.
+    expect(drawn.bottom[0]?.[column]).toBeGreaterThanOrEqual(Math.ceil(slotPx) - 2);
+    expect(drawn.top[1]?.[column]).toBeGreaterThan(slotPx * 1.1);
+  });
+}

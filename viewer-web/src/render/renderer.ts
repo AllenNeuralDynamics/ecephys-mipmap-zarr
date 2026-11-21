@@ -34,12 +34,18 @@ interface Needed {
 
 const tileId = (key: string, coords: readonly number[]): string => `${key}|${coords.join(",")}`;
 
-function median(values: number[]): number {
+/** The `q` quantile of the finite `values`, interpolating between neighbours; NaN when none are finite. */
+function quantile(values: number[], q: number): number {
   const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
   if (finite.length === 0) return NaN;
-  const mid = finite.length >> 1;
-  return finite.length % 2 === 1 ? (finite[mid] ?? NaN) : 0.5 * ((finite[mid - 1] ?? 0) + (finite[mid] ?? 0));
+  const at = q * (finite.length - 1);
+  const below = Math.floor(at);
+  const lo = finite[below] ?? NaN;
+  return lo + (at - below) * ((finite[Math.min(below + 1, finite.length - 1)] ?? lo) - lo);
 }
+
+/** Quantile of a channel's excursion from its centre that reaches the slot's edge at gain 1. */
+const EXCURSION_QUANTILE = 0.95;
 
 /**
  * Draws a store's view on a WebGL2 canvas, fetching the tiles each frame needs and drawing coarser resident
@@ -103,7 +109,10 @@ export class Renderer {
     return this.#displayed;
   }
 
-  /** Value units per slot height at gain 1: the median channel's median block range at the coarsest level. */
+  /**
+   * Value units per slot height at gain 1: twice the median across channels of each one's `EXCURSION_QUANTILE`
+   * excursion from its centre at the coarsest level, so slow swings count as well as block widths.
+   */
   get unitRange(): number {
     return this.#unitRange;
   }
@@ -214,22 +223,34 @@ export class Renderer {
   }
 
   #finishStats(array: ArrayInfo, decoded: { tile: Tile; values: Float32Array; shape: number[] }[]): void {
-    const mids: number[][] = Array.from({ length: this.info.nChannels }, () => []);
-    const ranges: number[][] = Array.from({ length: this.info.nChannels }, () => []);
+    const lows: number[][] = Array.from({ length: this.info.nChannels }, () => []);
+    const highs: number[][] = Array.from({ length: this.info.nChannels }, () => []);
     for (const { tile, values, shape } of decoded) {
       const [nC = 0, , nB = 0] = shape;
       const c0 = (tile.coords[0] ?? 0) * (array.chunks[0] ?? 0);
       for (let c = 0; c < nC; c++) {
         for (let b = 0; b < nB; b++) {
-          const lo = values[c * 2 * nB + b] ?? NaN;
-          const hi = values[(c * 2 + 1) * nB + b] ?? NaN;
-          mids[c0 + c]?.push(0.5 * (lo + hi));
-          ranges[c0 + c]?.push(hi - lo);
+          lows[c0 + c]?.push(values[c * 2 * nB + b] ?? NaN);
+          highs[c0 + c]?.push(values[(c * 2 + 1) * nB + b] ?? NaN);
         }
       }
     }
-    this.#centre = Float32Array.from(mids, (m) => median(m) || 0);
-    const unitRange = median(ranges.map(median));
+    const excursions: number[] = [];
+    this.#centre = Float32Array.from(lows, (lo, c) => {
+      const hi = highs[c] ?? [];
+      const centre = quantile(
+        lo.map((v, b) => 0.5 * (v + (hi[b] ?? NaN))),
+        0.5,
+      );
+      excursions.push(
+        quantile(
+          lo.map((v, b) => Math.max((hi[b] ?? NaN) - centre, centre - v)),
+          EXCURSION_QUANTILE,
+        ),
+      );
+      return centre || 0;
+    });
+    const unitRange = 2 * quantile(excursions, 0.5);
     this.#unitRange = Number.isFinite(unitRange) && unitRange > 0 ? unitRange : 1;
     this.#statsReady = true;
     this.#uploadSlots();

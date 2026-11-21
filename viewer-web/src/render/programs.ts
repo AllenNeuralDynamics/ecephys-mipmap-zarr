@@ -22,6 +22,8 @@ uniform vec2 u_canvasPx;
 uniform float u_firstSlot;
 uniform float u_slotPx;
 uniform float u_pxPerUnit;
+// The slot's top and bottom rows; the fragment shader clips to them so one channel cannot paint over another.
+flat out vec2 v_band;
 
 float code(int series, int i) {
   return float(texelFetch(u_codes, ivec2(i % u_width, series * u_rowsPerSeries + i / u_width), 0).r);
@@ -51,6 +53,7 @@ void main() {
   float lo = code(2 * c, block) * decode.x + decode.y - slot.y;
   float hi = code(2 * c + 1, block) * decode.x + decode.z - slot.y;
   float centre = (slot.x - u_firstSlot + 0.5) * u_slotPx;
+  v_band = vec2(centre - 0.5 * u_slotPx, centre + 0.5 * u_slotPx);
   float yLo = centre - lo * u_pxPerUnit;
   float yHi = centre - hi * u_pxPerUnit;
   // An envelope thinner than a pixel would vanish; widen it to one about its midpoint.
@@ -71,15 +74,22 @@ void main() {
   if (slot.x < 0.0) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   float value = code(c, i) * decode.x + decode.y - slot.y;
   float centre = (slot.x - u_firstSlot + 0.5) * u_slotPx;
+  v_band = vec2(centre - 0.5 * u_slotPx, centre + 0.5 * u_slotPx);
   gl_Position = clip(u_originPx + (float(i) + 0.5) * u_pxPerIndex, centre - value * u_pxPerUnit);
 }
 `;
 
 const FRAGMENT = `#version 300 es
 precision mediump float;
+uniform highp vec2 u_canvasPx;
 uniform vec4 u_color;
+flat in highp vec2 v_band;
 out vec4 color;
-void main() { color = u_color; }
+void main() {
+  highp float y = u_canvasPx.y - gl_FragCoord.y;
+  if (y < v_band.x || y > v_band.y) discard;
+  color = u_color;
+}
 `;
 
 export const UNIFORMS = [
