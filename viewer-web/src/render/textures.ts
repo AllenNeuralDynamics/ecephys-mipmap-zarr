@@ -105,22 +105,24 @@ export function uploadTile(gl: WebGL2RenderingContext, tile: Tile, array: ArrayI
   };
 }
 
+/** Channel `c`'s decode: value units per code step, and the offsets added to min and max codes. */
+export function decodeTerms(decode: Decode, c: number): { scale: number; minOffset: number; maxOffset: number } {
+  if (decode.kind === "shift") return { scale: 2 ** decode.bits, minOffset: 0, maxOffset: 0 };
+  if (decode.kind === "affine") {
+    const offset = decode.offset[c] ?? 0;
+    return { scale: decode.scale[c] ?? 1, minOffset: offset, maxOffset: offset };
+  }
+  if (decode.kind === "affine-minmax") {
+    return { scale: decode.scale[c] ?? 1, minOffset: decode.minOffset[c] ?? 0, maxOffset: decode.maxOffset[c] ?? 0 };
+  }
+  return { scale: 1, minOffset: 0, maxOffset: 0 };
+}
+
 /** Per-channel decode as one RGBA32F row: scale, offset (or min offset), max offset. */
 export function uploadDecode(gl: WebGL2RenderingContext, decode: Decode, nChannels: number): WebGLTexture {
   const texels = new Float32Array(nChannels * 4);
   for (let c = 0; c < nChannels; c++) {
-    let scale = 1;
-    let minOffset = 0;
-    let maxOffset = 0;
-    if (decode.kind === "shift") scale = 2 ** decode.bits;
-    else if (decode.kind === "affine") {
-      scale = decode.scale[c] ?? 1;
-      minOffset = maxOffset = decode.offset[c] ?? 0;
-    } else if (decode.kind === "affine-minmax") {
-      scale = decode.scale[c] ?? 1;
-      minOffset = decode.minOffset[c] ?? 0;
-      maxOffset = decode.maxOffset[c] ?? 0;
-    }
+    const { scale, minOffset, maxOffset } = decodeTerms(decode, c);
     texels.set([scale, minOffset, maxOffset, 0], c * 4);
   }
   return floatRow(gl, texels, nChannels, gl.RGBA32F, gl.RGBA);

@@ -4,6 +4,7 @@ import { expect, test, type Page } from "@playwright/test";
 import FileSystemStore from "@zarrita/storage/fs";
 
 import { planWindow } from "../../src/reader/plan.js";
+import { FILL_LEVEL } from "../../src/render/ramp.js";
 import { openStore, type OpenedStore } from "../../src/reader/store.js";
 import { TileSource } from "../../src/reader/tiles.js";
 import type { View } from "../../src/render/view.js";
@@ -15,11 +16,18 @@ const N_SAMPLES = 200_000;
 /** Each channel's spike, which make_fixtures.py puts at `5000 + 20011 * channel`. */
 const spikeAt = (channel: number): number => 5_000 + 20_011 * channel;
 const PX_TOLERANCE = 2;
+/** Columns a joining outline reaches either side: at 1.7 px plus antialiasing, a steep one touches the second. */
+const REACH_COLUMNS = 2;
+/**
+ * Alpha a pixel needs to count as drawn: the fill counts, an antialiased line's faint fringe does not. The ramp
+ * reaches full alpha at the fill level, so this is a level of 1/8.
+ */
+const DRAWN_ALPHA = Math.round(((1 / 8) * 255) / FILL_LEVEL);
 
 interface Drawn {
   width: number;
   height: number;
-  /** Per slot, per column: topmost and bottommost drawn row (top = 0), or -1 for none. */
+  /** Per slot, per column: topmost and bottommost row drawn at `DRAWN_ALPHA` or more (top = 0), or -1 for none. */
   top: number[][];
   bottom: number[][];
   layout: { centres: number[]; slotPx: number; pxPerUnit: number; view: View; displayed: number[] };
@@ -38,11 +46,14 @@ async function render(
   await page.goto("/test/e2e/page.html");
   await page.waitForFunction(() => (window as unknown as { viewerReady?: boolean }).viewerReady === true);
   return page.evaluate(
-    async ({ store, channels, range, widthPx, fs, excursion, slotsPerExcursion }) => {
+    async ({ store, channels, range, widthPx, fs, excursion, slotsPerExcursion, drawnAlpha }) => {
       const viewer = document.querySelector("mipmap-viewer");
       if (viewer === null) throw new Error("no viewer");
       viewer.style.width = `${String(widthPx)}px`;
       viewer.channels = channels;
+      // Slots follow `channels` as given, not depth.
+      viewer.order = "index";
+      viewer.setAttribute("controls", "none");
       viewer.store = store;
       await viewer.ready;
       await viewer.idle();
@@ -63,7 +74,7 @@ async function render(
         const slotBottom = bottom[slot];
         if (slotTop === undefined || slotBottom === undefined) continue;
         for (let x = 0; x < shot.width; x++) {
-          if ((shot.data[(row * shot.width + x) * 4 + 3] ?? 0) === 0) continue;
+          if ((shot.data[(row * shot.width + x) * 4 + 3] ?? 0) < drawnAlpha) continue;
           if (slotTop[x] === -1 || y < (slotTop[x] ?? 0)) slotTop[x] = y;
           if (y > (slotBottom[x] ?? 0)) slotBottom[x] = y;
         }
@@ -76,7 +87,16 @@ async function render(
         layout: { ...layout, centres: Array.from(layout.centres), displayed: [...layout.displayed] },
       };
     },
-    { store: `/test/fixtures/${store}.zarr`, channels, range, widthPx, fs: FS, excursion, slotsPerExcursion },
+    {
+      store: `/test/fixtures/${store}.zarr`,
+      channels,
+      range,
+      widthPx,
+      fs: FS,
+      excursion,
+      slotsPerExcursion,
+      drawnAlpha: DRAWN_ALPHA,
+    },
   );
 }
 
@@ -96,7 +116,7 @@ async function fullRange(store: string, channels: number[]): Promise<number> {
   return widest;
 }
 
-/** Columns whose drawn extent leaves the data's range (widened by neighbouring blocks) or misses its core. */
+/** Columns whose drawn extent leaves the data's range (widened by the columns and blocks outlines reach) or misses its core. */
 async function mismatches(opened: OpenedStore, drawn: Drawn, key: string): Promise<string[]> {
   const array = opened.info.arrays[key];
   if (array === undefined) throw new Error(`no ${key}`);
@@ -104,10 +124,11 @@ async function mismatches(opened: OpenedStore, drawn: Drawn, key: string): Promi
   const { view, slotPx, pxPerUnit, centres, displayed } = drawn.layout;
   const stride = array.stride;
   const margin = 2 * stride;
-  const start = Math.max(0, Math.floor((view.t0 - margin) / stride));
+  const reach = REACH_COLUMNS * view.samplesPerPx;
+  const start = Math.max(0, Math.floor((view.t0 - reach - margin) / stride));
   const end = Math.min(
     array.shape.length === 3 ? (array.shape[2] ?? 0) : N_SAMPLES,
-    Math.ceil((view.t0 + view.samplesPerPx * drawn.width + margin) / stride),
+    Math.ceil((view.t0 + view.samplesPerPx * drawn.width + reach + margin) / stride),
   );
   const problems: string[] = [];
   for (const [slot, channel] of displayed.entries()) {
@@ -132,7 +153,7 @@ async function mismatches(opened: OpenedStore, drawn: Drawn, key: string): Promi
       const c1 = c0 + view.samplesPerPx;
       const top = drawn.top[slot]?.[x] ?? -1;
       const bottom = drawn.bottom[slot]?.[x] ?? -1;
-      const outer = extent(c0 - margin, c1 + margin);
+      const outer = extent(c0 - reach - margin, c1 + reach + margin);
       const inner = extent(c0, c1);
       if (top === -1) {
         if (inner !== undefined) problems.push(`channel ${String(channel + 1)} column ${String(x + 1)}: nothing drawn`);

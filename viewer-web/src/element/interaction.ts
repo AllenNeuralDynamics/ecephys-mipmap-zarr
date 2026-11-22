@@ -15,7 +15,21 @@ export interface InteractionTarget {
 const ZOOM_PER_WHEEL = 1.25;
 const GAIN_STEP = 1.25;
 const DRAG_THRESHOLD_PX = 4;
-const SETTLE_MS = 200;
+/** Quiet time after a wheel or key before a gesture counts as finished. */
+export const SETTLE_MS = 200;
+
+/** Wheel delta in CSS pixels, whatever unit the browser reported it in. */
+function wheelPx(event: WheelEvent, delta: number): number {
+  const unit =
+    event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 33 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1;
+  return delta * unit;
+}
+
+/** Slots a channel-scrolling wheel event moves the view by: about an eighth of a screen per 100 px. */
+export function wheelSlots(event: WheelEvent, nSlots: number): number {
+  // Browsers report shift-wheel as horizontal on some platforms.
+  return (wheelPx(event, event.deltaY || event.deltaX) / 100) * Math.max(1, nSlots / 8);
+}
 
 /**
  * Drag pans, wheel zooms time about the cursor, shift-wheel scrolls channels, up and down change gain.
@@ -66,15 +80,11 @@ export function attachInteraction(target: InteractionTarget): () => void {
     const view = target.view();
     if (view === undefined) return;
     event.preventDefault();
-    const lines =
-      event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 33 : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 400 : 1;
     if (event.shiftKey) {
-      // Browsers report shift-wheel as horizontal on some platforms.
-      const delta = (event.deltaY || event.deltaX) * lines;
-      target.setView({ firstSlot: view.firstSlot + (delta / 100) * Math.max(1, view.nSlots / 8) });
+      target.setView({ firstSlot: view.firstSlot + wheelSlots(event, view.nSlots) });
     } else {
       const [x] = local(event);
-      target.setView(zoomAbout(view, ZOOM_PER_WHEEL ** ((event.deltaY * lines) / 100), x));
+      target.setView(zoomAbout(view, ZOOM_PER_WHEEL ** (wheelPx(event, event.deltaY) / 100), x));
     }
     settleSoon();
   };

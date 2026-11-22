@@ -59,11 +59,11 @@ const RAW_PATHS = ["raw", "traces_seg0"];
 
 export const levelKey = (stride: number): string => `minmax/s${String(stride)}`;
 
-function toStrings(data: unknown): string[] {
+export function toStrings(data: unknown): string[] {
   return Array.from(data as Iterable<unknown>, (v) => String(v));
 }
 
-async function readProperty(arr: ZArray): Promise<Property> {
+export async function readProperty(arr: ZArray): Promise<Property> {
   const chunk = await zarr.get(arr);
   const data: unknown = chunk.data;
   let values: Property["values"];

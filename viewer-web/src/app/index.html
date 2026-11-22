@@ -5,11 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mipmap Viewer</title>
     <style>
+      :root {
+        color-scheme: light dark;
+      }
+      :root[data-theme="light"] {
+        color-scheme: light;
+      }
+      :root[data-theme="dark"] {
+        color-scheme: dark;
+      }
       html,
       body {
         margin: 0;
         height: 100%;
-        background: #fbfbfc;
+        background: light-dark(#fbfbfc, #1c1d20);
         font:
           13px system-ui,
           sans-serif;

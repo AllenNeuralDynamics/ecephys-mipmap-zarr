@@ -3,7 +3,8 @@ import { axes, DEFAULT_OVERSAMPLE, planWindow } from "../reader/plan.js";
 import { levelKey, type ArrayInfo, type StoreInfo } from "../reader/store.js";
 import { decodeTile, type Tile } from "../reader/tiles.js";
 import { Programs } from "./programs.js";
-import { floatRow, uploadDecode, uploadTile, type TileTexture } from "./textures.js";
+import { buildRamp, FILL_LEVEL, NOISE_LEVEL, RAMP_STEPS, type TracePalette } from "./ramp.js";
+import { decodeTerms, floatRow, uploadDecode, uploadTile, type TileTexture } from "./textures.js";
 import { clampView, visibleSamples, type View } from "./view.js";
 
 /** Anything that serves tiles: the worker client, or a `TileSource` in-process. */
@@ -15,10 +16,36 @@ export interface RendererOptions {
   /** Bytes of tile textures kept on the GPU, apart from the coarsest level, which stays resident. */
   textureBytes?: number;
   oversample?: number;
-  /** Trace colour, RGBA in 0..1. */
-  color?: [number, number, number, number];
+  palette?: TracePalette;
   onError?: (err: unknown) => void;
+  /** Called after `setView`, `setDisplayed` or `resize` changes the view or the channels. */
+  onViewChange?: (view: View) => void;
+  /** Called after each frame is drawn. */
+  onDraw?: () => void;
 }
+
+/** What a tinter is asked to colour: canvas columns from sample `t0`, and the channel in each visible row. */
+export interface TintRequest {
+  t0: number;
+  samplesPerPx: number;
+  columns: number;
+  channels: readonly number[];
+}
+
+/**
+ * Per visible row and column, two bytes: the palette group (1-based, so 0 means none) and the tint's strength
+ * out of 255. `undefined` draws no tint.
+ */
+export type Tinter = (request: TintRequest) => Uint8Array | undefined;
+
+export const DEFAULT_PALETTE: TracePalette = {
+  background: "#fbfbfc",
+  fill: "#e8edf5",
+  noise: "#a9b6ca",
+  ink: "#10141c",
+  groups: [],
+  lineWidth: [1, 1.7],
+};
 
 const DEFAULT_TEXTURE_BYTES = 256 * 1024 ** 2;
 
@@ -47,6 +74,47 @@ function quantile(values: number[], q: number): number {
 /** Quantile of a channel's excursion from its centre that reaches the slot's edge at gain 1. */
 const EXCURSION_QUANTILE = 0.95;
 
+/** Sds over which an outline rises from the noise level to full beyond the gate. */
+const OUTLINE_RISE = 2;
+
+/**
+ * Sds from the centre where an outline starts to brighten: past the expected extreme of a column's samples
+ * (about sqrt(2 ln n) sd for n normal samples), so wider columns do not light up on noise alone.
+ */
+export function gateStart(samplesPerPx: number): number {
+  return Math.max(3.5, Math.sqrt(2 * Math.log(Math.max(1, samplesPerPx))) + 1);
+}
+/** Extent texels no source reached; past any clamped offset and within half-float range. */
+const EMPTY_EXTENT = 6e4;
+
+/**
+ * Mean and standard deviation after repeatedly dropping values beyond 3 sd, so spikes do not count; unlike a
+ * median absolute deviation, the sd does not snap to the step of coarsely quantized values.
+ */
+function clippedStats(values: Float32Array): { mean: number; sd: number } {
+  let lo = -Infinity;
+  let hi = Infinity;
+  let mean = NaN;
+  let sd = NaN;
+  for (let pass = 0; pass < 5; pass++) {
+    let n = 0;
+    let sum = 0;
+    let squares = 0;
+    for (const v of values) {
+      if (v < lo || v > hi) continue;
+      n++;
+      sum += v;
+      squares += v * v;
+    }
+    if (n < 2) return { mean: NaN, sd: NaN };
+    mean = sum / n;
+    sd = Math.sqrt(Math.max(0, squares / n - mean * mean));
+    lo = mean - 3 * sd;
+    hi = mean + 3 * sd;
+  }
+  return { mean, sd };
+}
+
 /**
  * Draws a store's view on a WebGL2 canvas, fetching the tiles each frame needs and drawing coarser resident
  * tiles in place of any still in flight. Redraws only when the view, the channels or the resident tiles change.
@@ -58,6 +126,19 @@ export class Renderer {
   readonly #pinned = new Map<string, TileTexture>();
   readonly #decode = new Map<string, WebGLTexture>();
   readonly #slots: WebGLTexture;
+  readonly #sigmaTexture: WebGLTexture;
+  readonly #extent: WebGLTexture;
+  readonly #extentBuffer: WebGLFramebuffer;
+  #extentSize: [number, number] = [0, 0];
+  readonly #level: WebGLTexture;
+  readonly #levelBuffer: WebGLFramebuffer;
+  #levelSize: [number, number] = [0, 0];
+  readonly #ramp: WebGLTexture;
+  readonly #tint: WebGLTexture;
+  #palette: TracePalette;
+  #tinter: Tinter | undefined;
+  /** The array whose step the noise texture holds, or undefined when it needs uploading. */
+  #noiseKey: string | undefined;
   readonly #inFlight = new Map<string, AbortController>();
   /** Tiles whose fetch failed; not retried, so a missing chunk cannot loop the redraw. */
   readonly #failed = new Set<string>();
@@ -66,6 +147,9 @@ export class Renderer {
   #view: View;
   #displayed: number[];
   #centre: Float32Array;
+  /** Per channel noise sd and baseline from a raw chunk; 0 and NaN when unknown. */
+  #sigma: Float32Array;
+  #baseline: Float32Array;
   #unitRange = 1;
   #statsReady = false;
   #frame: number | null = null;
@@ -80,6 +164,8 @@ export class Renderer {
   ) {
     const gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: true });
     if (gl === null) throw new Error("WebGL2 is unavailable");
+    if (gl.getExtension("EXT_color_buffer_float") === null)
+      throw new Error("WebGL2 float render targets are unavailable");
     this.#gl = gl;
     this.#programs = new Programs(gl);
     this.#textures = new ByteLru(options.textureBytes ?? DEFAULT_TEXTURE_BYTES, (_, t) => {
@@ -87,9 +173,20 @@ export class Renderer {
     });
     this.#vao = gl.createVertexArray();
     this.#slots = gl.createTexture();
+    this.#sigmaTexture = gl.createTexture();
+    this.#extent = gl.createTexture();
+    this.#extentBuffer = gl.createFramebuffer();
+    this.#level = gl.createTexture();
+    this.#levelBuffer = gl.createFramebuffer();
+    this.#ramp = gl.createTexture();
+    this.#tint = gl.createTexture();
+    this.#palette = options.palette ?? DEFAULT_PALETTE;
+    this.#uploadRamp();
     this.#coarsest = levelKey(info.strides[info.strides.length - 1] ?? 0);
     this.#displayed = Array.from({ length: info.nChannels }, (_, c) => c);
     this.#centre = new Float32Array(info.nChannels);
+    this.#sigma = new Float32Array(info.nChannels);
+    this.#baseline = new Float32Array(info.nChannels).fill(NaN);
     this.#view = { t0: 0, samplesPerPx: 1, firstSlot: 0, nSlots: Math.min(info.nChannels, 64), gain: 1 };
     this.#uploadSlots();
     this.resize();
@@ -123,9 +220,27 @@ export class Renderer {
     return { centres: this.#centre, slotPx, pxPerUnit: (slotPx * this.#view.gain) / this.#unitRange };
   }
 
+  setPalette(palette: TracePalette): void {
+    this.#palette = palette;
+    this.#uploadRamp();
+    this.#invalidate();
+  }
+
+  /** Colour events on the traces; called on every draw with what is in view. */
+  setTinter(tinter: Tinter | undefined): void {
+    this.#tinter = tinter;
+    this.#invalidate();
+  }
+
+  /** Redraw, for a tinter whose data changed. */
+  redraw(): void {
+    this.#invalidate();
+  }
+
   setView(view: Partial<View>): View {
     this.#view = clampView({ ...this.#view, ...view }, this.#bounds(), this.canvas.width);
     this.#invalidate();
+    this.options.onViewChange?.(this.#view);
     return this.#view;
   }
 
@@ -147,6 +262,7 @@ export class Renderer {
     this.canvas.height = height;
     this.#view = clampView({ ...this.#view, samplesPerPx: span / width }, this.#bounds(), width);
     this.#invalidate();
+    this.options.onViewChange?.(this.#view);
   }
 
   /** Resolves once every tile the view needs is drawn and nothing is in flight. */
@@ -173,6 +289,13 @@ export class Renderer {
     for (const t of this.#pinned.values()) gl.deleteTexture(t.texture);
     for (const t of this.#decode.values()) gl.deleteTexture(t);
     gl.deleteTexture(this.#slots);
+    gl.deleteTexture(this.#sigmaTexture);
+    gl.deleteTexture(this.#extent);
+    gl.deleteFramebuffer(this.#extentBuffer);
+    gl.deleteTexture(this.#level);
+    gl.deleteFramebuffer(this.#levelBuffer);
+    gl.deleteTexture(this.#ramp);
+    gl.deleteTexture(this.#tint);
     gl.getExtension("WEBGL_lose_context")?.loseContext();
   }
 
@@ -189,6 +312,7 @@ export class Renderer {
     this.#frame = requestAnimationFrame(() => {
       this.#frame = null;
       this.#draw();
+      this.options.onDraw?.();
       if (this.#isIdle()) for (const resolve of this.#idleWaiters.splice(0)) resolve();
     });
   }
@@ -203,22 +327,44 @@ export class Renderer {
     return this.#pinned.get(id) ?? this.#textures.get(id);
   }
 
-  /** Fetch the whole coarsest level once: it centres each channel, sets the amplitude scale, and backs every fallback. */
+  /**
+   * Fetch the whole coarsest level once: it sets the amplitude scale and backs every fallback. Also fetch raw's
+   * middle time chunk, for each channel's noise sd and the baseline it is centred on.
+   */
   #loadStats(): void {
     const array = this.#array(this.#coarsest);
-    const all = this.#tilesCovering(
-      array,
-      Array.from({ length: this.info.nChannels }, (_, c) => c),
-      0,
-      array.shape[2] ?? 0,
-    );
+    const channels = Array.from({ length: this.info.nChannels }, (_, c) => c);
+    const all = this.#tilesCovering(array, channels, 0, array.shape[2] ?? 0);
+    const raw = this.info.arrays.raw;
+    const middle = Math.floor(this.info.nSamples / 2);
+    const noise = raw === undefined ? [] : this.#tilesCovering(raw, channels, middle, middle + 1);
     const decoded: { tile: Tile; values: Float32Array; shape: number[] }[] = [];
-    let remaining = all.length;
+    let remaining = all.length + noise.length;
+    const settled = (): void => {
+      if (--remaining === 0) this.#finishStats(array, decoded);
+    };
     for (const need of all) {
       this.#request(need, (tile) => {
         if (tile !== null) decoded.push({ tile, ...decodeTile(tile, array) });
-        if (--remaining === 0) this.#finishStats(array, decoded);
+        settled();
       });
+    }
+    for (const need of noise) {
+      this.#request(need, (tile) => {
+        if (tile !== null && raw !== undefined) this.#measureNoise(tile, raw);
+        settled();
+      });
+    }
+  }
+
+  #measureNoise(tile: Tile, raw: ArrayInfo): void {
+    const { shape, values } = decodeTile(tile, raw);
+    const [nC = 0, nT = 0] = shape;
+    const c0 = (tile.coords[axes(raw).channel] ?? 0) * (raw.chunks[axes(raw).channel] ?? 0);
+    for (let c = 0; c < nC; c++) {
+      const { mean, sd } = clippedStats(values.subarray(c * nT, (c + 1) * nT));
+      this.#sigma[c0 + c] = Number.isFinite(sd) ? sd : 0;
+      this.#baseline[c0 + c] = mean;
     }
   }
 
@@ -238,10 +384,14 @@ export class Renderer {
     const excursions: number[] = [];
     this.#centre = Float32Array.from(lows, (lo, c) => {
       const hi = highs[c] ?? [];
-      const centre = quantile(
-        lo.map((v, b) => 0.5 * (v + (hi[b] ?? NaN))),
-        0.5,
-      );
+      // Block midpoints lean toward a channel's spikes, so a raw baseline is the better centre when there is one.
+      const baseline = this.#baseline[c] ?? NaN;
+      const centre = Number.isFinite(baseline)
+        ? baseline
+        : quantile(
+            lo.map((v, b) => 0.5 * (v + (hi[b] ?? NaN))),
+            0.5,
+          );
       excursions.push(
         quantile(
           lo.map((v, b) => Math.max((hi[b] ?? NaN) - centre, centre - v)),
@@ -258,10 +408,83 @@ export class Renderer {
   }
 
   #uploadSlots(): void {
+    const gl = this.#gl;
     const texels = new Float32Array(this.info.nChannels * 2).fill(-1);
     for (let c = 0; c < this.info.nChannels; c++) texels[c * 2 + 1] = this.#centre[c] ?? 0;
     this.#displayed.forEach((c, slot) => (texels[c * 2] = slot));
-    floatRow(this.#gl, texels, this.info.nChannels, this.#gl.RG32F, this.#gl.RG, this.#slots);
+    floatRow(gl, texels, this.info.nChannels, gl.RG32F, gl.RG, this.#slots);
+    this.#noiseKey = undefined;
+  }
+
+  /** Per displayed slot: noise sd and `array`'s quantization step, in value units. */
+  #uploadNoise(array: ArrayInfo): void {
+    const gl = this.#gl;
+    // A channel without its own sd (a failed or flat chunk) takes the median of the others.
+    const known = [...this.#sigma].filter((v) => v > 0);
+    const fallback = known.length > 0 ? quantile(known, 0.5) : 0;
+    const texels = new Float32Array(Math.max(1, this.#displayed.length) * 2);
+    this.#displayed.forEach((c, slot) => {
+      const sd = this.#sigma[c] ?? 0;
+      texels[slot * 2] = sd > 0 ? sd : fallback;
+      texels[slot * 2 + 1] = Math.abs(decodeTerms(array.decode, c).scale);
+    });
+    floatRow(gl, texels, texels.length / 2, gl.RG32F, gl.RG, this.#sigmaTexture);
+    this.#noiseKey = array.key;
+  }
+
+  #uploadRamp(): void {
+    const gl = this.#gl;
+    const rows = 1 + this.#palette.groups.length;
+    gl.bindTexture(gl.TEXTURE_2D, this.#ramp);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, RAMP_STEPS, rows, 0, gl.RGBA, gl.UNSIGNED_BYTE, buildRamp(this.#palette));
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+  }
+
+  /** Size the level texture to the canvas and clear it. */
+  #prepareLevel(width: number, height: number): void {
+    const gl = this.#gl;
+    if (this.#levelSize[0] !== width || this.#levelSize[1] !== height) {
+      gl.bindTexture(gl.TEXTURE_2D, this.#level);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.#levelBuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.#level, 0);
+      this.#levelSize = [width, height];
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#levelBuffer);
+    gl.viewport(0, 0, width, height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+
+  /** Upload the tinter's colours for the visible rows, or report that there are none. */
+  #uploadTint(view: View, columns: number, channels: readonly number[]): boolean {
+    const data = this.#tinter?.({ t0: view.t0, samplesPerPx: view.samplesPerPx, columns, channels });
+    if (data === undefined || data.length !== columns * channels.length * 2) return false;
+    const gl = this.#gl;
+    gl.bindTexture(gl.TEXTURE_2D, this.#tint);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, columns, channels.length, 0, gl.RG, gl.UNSIGNED_BYTE, data);
+    for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+    return true;
+  }
+
+  /** Size the extent texture to `columns` by `rows` and clear it to empty. */
+  #prepareExtent(columns: number, rows: number): void {
+    const gl = this.#gl;
+    if (this.#extentSize[0] !== columns || this.#extentSize[1] !== rows) {
+      gl.bindTexture(gl.TEXTURE_2D, this.#extent);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG16F, columns, rows, 0, gl.RG, gl.HALF_FLOAT, null);
+      for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.#extentBuffer);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.#extent, 0);
+      this.#extentSize = [columns, rows];
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#extentBuffer);
+    gl.viewport(0, 0, columns, rows);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.clearBufferfv(gl.COLOR, 0, [EMPTY_EXTENT, EMPTY_EXTENT, 0, 0]);
   }
 
   /** Tiles of `array` covering `channels` and indices `[start, end)`, grouped by channel chunk. */
@@ -331,6 +554,7 @@ export class Renderer {
     const view = this.#view;
     const width = this.canvas.width;
     const height = this.canvas.height;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, width, height);
     gl.clearColor(0, 0, 0, 0);
     gl.disable(gl.SCISSOR_TEST);
@@ -341,6 +565,7 @@ export class Renderer {
     const plan = planWindow(this.info, s0, s1, width, this.options.oversample ?? DEFAULT_OVERSAMPLE);
     const first = Math.floor(view.firstSlot);
     const visible = this.#displayed.slice(first, Math.ceil(view.firstSlot + view.nSlots) + 1);
+    if (visible.length === 0) return;
     const array = this.#array(plan.key);
     const needed = this.#tilesCovering(array, visible, plan.start, plan.end);
     const wanted = new Set(needed.map((n) => n.id));
@@ -381,18 +606,23 @@ export class Renderer {
 
     const slotPx = height / view.nSlots;
     const pxPerUnit = (slotPx * view.gain) / this.#unitRange;
-    const color = this.options.color ?? [0.12, 0.14, 0.2, 1];
+    const rows = visible.length;
     gl.bindVertexArray(this.#vao);
-    // Fallbacks first, so a resident tile at the chosen level is never drawn under a coarser one.
-    draws.sort((a, b) => (a.scissor === undefined ? 1 : 0) - (b.scissor === undefined ? 1 : 0));
+    gl.enable(gl.BLEND);
+
+    // Pass 1: each column's extremes per visible slot. MIN blending keeps the outermost of every source.
+    this.#prepareExtent(width, rows);
+    gl.blendEquation(gl.MIN);
     for (const { array: drawn, texture, scissor } of draws) {
       const envelope = drawn.key !== "raw";
-      const { program, uniforms: u } = this.#programs.get(envelope ? "envelope" : "raw", texture.sampler);
+      const count = envelope ? texture.length * 6 : Math.max(0, texture.length - 1) * 6;
+      if (count === 0) continue;
+      const { program, uniforms: u } = this.#programs.get(envelope ? "extent-envelope" : "extent-raw", texture.sampler);
       gl.useProgram(program);
       if (scissor === undefined) gl.disable(gl.SCISSOR_TEST);
       else {
         gl.enable(gl.SCISSOR_TEST);
-        gl.scissor(scissor[0], 0, Math.max(0, scissor[1] - scissor[0]), height);
+        gl.scissor(scissor[0], 0, Math.max(0, scissor[1] - scissor[0]), rows);
       }
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, texture.texture);
@@ -409,13 +639,63 @@ export class Renderer {
       gl.uniform1f(u.u_originPx, (texture.start * drawn.stride - view.t0) / view.samplesPerPx);
       gl.uniform1f(u.u_pxPerIndex, drawn.stride / view.samplesPerPx);
       gl.uniform2f(u.u_canvasPx, width, height);
-      gl.uniform1f(u.u_firstSlot, view.firstSlot);
-      gl.uniform1f(u.u_slotPx, slotPx);
       gl.uniform1f(u.u_pxPerUnit, pxPerUnit);
-      gl.uniform4f(u.u_color, ...color);
-      const count = envelope ? texture.length * 6 : texture.length;
-      gl.drawArraysInstanced(envelope ? gl.TRIANGLES : gl.LINE_STRIP, 0, count, texture.nChannels);
+      gl.uniform1i(u.u_row0, first);
+      gl.uniform1i(u.u_rows, rows);
+      gl.uniform1f(u.u_limit, 0.5 * slotPx + 4);
+      gl.drawArraysInstanced(gl.TRIANGLES, 0, count, texture.nChannels);
     }
     gl.disable(gl.SCISSOR_TEST);
+
+    // Pass 2: fill and outlines from the extremes, as levels.
+    if (this.#noiseKey !== array.key) this.#uploadNoise(array);
+    this.#prepareLevel(width, height);
+    gl.blendEquation(gl.MAX);
+    const { program, uniforms: u } = this.#programs.get("trace");
+    gl.useProgram(program);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.#extent);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.#sigmaTexture);
+    gl.uniform1i(u.u_extent, 0);
+    gl.uniform1i(u.u_sigma, 1);
+    gl.uniform2f(u.u_canvasPx, width, height);
+    gl.uniform1f(u.u_firstSlot, view.firstSlot);
+    gl.uniform1f(u.u_slotPx, slotPx);
+    gl.uniform1f(u.u_pxPerUnit, pxPerUnit);
+    gl.uniform1i(u.u_row0, first);
+    gl.uniform1i(u.u_columns, width);
+    const ratio = Math.max(1, globalThis.devicePixelRatio || 1);
+    const [thin, thick] = this.#palette.lineWidth;
+    gl.uniform2f(u.u_halfWidth, 0.5 * thin * ratio, 0.5 * thick * ratio);
+    gl.uniform2f(u.u_gate, gateStart(view.samplesPerPx), OUTLINE_RISE);
+    gl.uniform1f(u.u_dim, NOISE_LEVEL);
+    gl.uniform1f(u.u_fill, FILL_LEVEL);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, width * 18, rows);
+    gl.disable(gl.BLEND);
+
+    // Pass 3: colour the levels onto the canvas.
+    const tinted = this.#uploadTint(view, width, visible);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, width, height);
+    const resolve = this.#programs.get("resolve");
+    gl.useProgram(resolve.program);
+    const r = resolve.uniforms;
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.#level);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.#ramp);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.#tint);
+    gl.uniform1i(r.u_level, 0);
+    gl.uniform1i(r.u_ramp, 1);
+    gl.uniform1i(r.u_tint, 2);
+    gl.uniform1i(r.u_tinted, tinted ? 1 : 0);
+    gl.uniform2f(r.u_canvasPx, width, height);
+    gl.uniform1f(r.u_firstSlot, view.firstSlot);
+    gl.uniform1f(r.u_slotPx, slotPx);
+    gl.uniform1i(r.u_row0, first);
+    gl.uniform1i(r.u_rows, rows);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }

@@ -24,8 +24,17 @@ const channels = params.get("channels");
 if (channels !== null) viewer.channels = parseChannels(channels);
 const order = params.get("order");
 if (order !== null) viewer.order = order as ChannelOrder;
+const theme = params.get("theme");
+if (theme === "light" || theme === "dark") {
+  viewer.theme = theme;
+  document.documentElement.dataset.theme = theme;
+}
 const gain = Number(params.get("gain"));
 if (gain > 0) viewer.gain = gain;
+const events = params.get("events");
+if (events !== null) viewer.events = events;
+const selected = params.get("groups");
+if (selected !== null) viewer.selectedGroups = selected.split(",").filter(Boolean);
 const store = params.get("store");
 if (store !== null) {
   input.value = store;
@@ -41,9 +50,10 @@ form.addEventListener("submit", (event) => {
 });
 
 viewer.addEventListener("viewchange", (event) => {
-  const { timeRange, gain } = (event as CustomEvent<ViewChangeDetail>).detail;
+  const { timeRange, gain, order } = (event as CustomEvent<ViewChangeDetail>).detail;
   const url = new URL(location.href);
   url.searchParams.set("time", timeRange.map((t) => t.toFixed(6)).join(","));
   url.searchParams.set("gain", gain.toPrecision(4));
+  url.searchParams.set("order", order);
   history.replaceState(null, "", url);
 });
