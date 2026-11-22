@@ -1,4 +1,9 @@
-import { defineMipmapViewer, type ChannelOrder, type ViewChangeDetail } from "../element/mipmap-viewer.js";
+import {
+  defineMipmapViewer,
+  type ChannelOrder,
+  type SelectionChangeDetail,
+  type ViewChangeDetail,
+} from "../element/mipmap-viewer.js";
 
 defineMipmapViewer();
 
@@ -35,6 +40,7 @@ const events = params.get("events");
 if (events !== null) viewer.events = events;
 const selected = params.get("groups");
 if (selected !== null) viewer.selectedGroups = selected.split(",").filter(Boolean);
+if (params.get("unselected") === "hidden") viewer.unselected = "hidden";
 const store = params.get("store");
 if (store !== null) {
   input.value = store;
@@ -55,5 +61,13 @@ viewer.addEventListener("viewchange", (event) => {
   url.searchParams.set("time", timeRange.map((t) => t.toFixed(6)).join(","));
   url.searchParams.set("gain", gain.toPrecision(4));
   url.searchParams.set("order", order);
+  history.replaceState(null, "", url);
+});
+
+viewer.addEventListener("selectionchange", (event) => {
+  const { selectedGroups } = (event as CustomEvent<SelectionChangeDetail>).detail;
+  const url = new URL(location.href);
+  if (selectedGroups.length > 0) url.searchParams.set("groups", selectedGroups.join(","));
+  else url.searchParams.delete("groups");
   history.replaceState(null, "", url);
 });

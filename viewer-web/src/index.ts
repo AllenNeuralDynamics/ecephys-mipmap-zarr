@@ -19,7 +19,13 @@ export {
   MipmapViewer,
   type ChannelClickDetail,
   type ChannelOrder,
+  type GroupClickDetail,
+  type GroupStyle,
+  type SelectionChangeDetail,
+  type Theme,
+  type UnselectedMode,
   type ViewChangeDetail,
 } from "./element/mipmap-viewer.js";
+export { EventLayer, type EventGroups, type EventLayerInfo, type EventWindow } from "./events/layer.js";
 export { Renderer, type RendererOptions, type TileProvider } from "./render/renderer.js";
 export { clampView, panBy, visibleSamples, zoomAbout, type View } from "./render/view.js";

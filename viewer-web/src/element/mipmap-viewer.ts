@@ -1,9 +1,10 @@
 import { EventLayer } from "../events/layer.js";
+import type { EventLayerInfo } from "../events/layer.js";
 import { EventTinter } from "../events/tinter.js";
 import { ReaderClient } from "../reader/client.js";
 import type { StoreInfo } from "../reader/store.js";
-import { DEFAULT_PALETTE, Renderer } from "../render/renderer.js";
-import type { TracePalette } from "../render/ramp.js";
+import { DEFAULT_PALETTE, Renderer, type TintRequest } from "../render/renderer.js";
+import { mutedColour, type TracePalette } from "../render/ramp.js";
 import { viewOfRange, visibleSamples, type View } from "../render/view.js";
 import ReaderWorker from "../reader/worker.ts?worker&inline";
 import { Controls, CONTROLS_STYLE } from "./controls.js";
@@ -25,6 +26,47 @@ export interface ViewChangeDetail {
 export interface ChannelClickDetail {
   channel: number;
   channelId: string;
+}
+
+/** How groups outside a non-empty selection draw. */
+export type UnselectedMode = "muted" | "hidden";
+
+/** The colours an event group draws with, for pages that show the groups elsewhere. */
+export interface GroupStyle {
+  id: string;
+  colour: string;
+  /** Its colour while other groups are selected. */
+  muted: string;
+}
+
+export interface GroupClickDetail {
+  groupId: string;
+  /** Whether the group was selected before the click. */
+  selected: boolean;
+}
+
+export interface SelectionChangeDetail {
+  selectedGroups: string[];
+}
+
+/** Ramp rows the tint's one-byte row index can name, after the ink row. */
+const MAX_GROUP_ROWS = 254;
+/** Columns, CSS px, a click may miss an event's tint by and still pick its group. */
+const CLICK_SLACK_PX = 3;
+
+let colourContext: CanvasRenderingContext2D | null | undefined;
+/** Any CSS colour as `#rrggbb` or `rgba()`, which the ramp parses. */
+function normaliseColour(text: string): string {
+  colourContext ??= document.createElement("canvas").getContext("2d");
+  if (colourContext === null) return text;
+  // An unparsable colour leaves fillStyle unchanged, so two different starts expose it.
+  colourContext.fillStyle = "#000000";
+  colourContext.fillStyle = text;
+  const fromBlack = colourContext.fillStyle;
+  colourContext.fillStyle = "#ffffff";
+  colourContext.fillStyle = text;
+  if (colourContext.fillStyle !== fromBlack) throw new Error(`unparsable colour: ${text}`);
+  return fromBlack;
 }
 
 // Traces run fill → noise → ink with how far an outline is past the noise gate; `--mv-units` colours event groups.
@@ -49,7 +91,8 @@ canvas { position: absolute; left: 0; top: 0; width: calc(100% - 14px); height: 
 canvas:active { cursor: grabbing; }
 .labels { position: absolute; inset: 0 14px 0 0; overflow: hidden; pointer-events: none;
   font: 10px system-ui, sans-serif; }
-.labels span { position: absolute; white-space: nowrap; line-height: 1; }
+.labels span { position: absolute; white-space: nowrap; line-height: 1; pointer-events: auto; cursor: pointer; }
+.labels span.selected { font-weight: 600; }
 .status { position: absolute; left: 8px; top: 8px; font: 12px system-ui, sans-serif; opacity: 0.7; pointer-events: none; }
 `;
 
@@ -75,11 +118,17 @@ export function depthOrder(info: StoreInfo, channels: readonly number[]): number
  * and `gain` may be set before or after it opens. `order` defaults to depth when the store has channel locations.
  * Fires `viewchange` when a gesture or control change ends and `channelclick` on a click that is not a drag.
  * `controls="none"` hides the channel scroll bar and the toolbar. `theme` is `auto` (the default), `light` or
- * `dark`. `events` is the URL of an event layer whose groups colour the traces they cover; `selectedGroups`
- * narrows the colouring to those groups' ids.
+ * `dark`. `events` is the URL of an event layer whose groups colour the traces they cover.
+ *
+ * Groups whose footprints overlap get different colours from `--mv-units`, each with a muted variant
+ * (`--mv-units-muted`, or derived); `groupColours` overrides any group's. `selectedGroups` draw in full colour at
+ * any zoom and the rest muted, or not at all with `unselected="hidden"`. A click on a group's tint or label fires
+ * a cancelable `groupclick`, then toggles the group and fires `selectionchange`; Escape and the toolbar clear the
+ * selection. `selectionchange` and `viewchange` report the viewer's own UI only: changes made through properties
+ * fire nothing. `groupschange` fires whenever the groups' colours change, from any cause.
  */
 export class MipmapViewer extends HTMLElement {
-  static readonly observedAttributes = ["store", "gain", "order", "controls", "theme", "events"];
+  static readonly observedAttributes = ["store", "gain", "order", "controls", "theme", "events", "unselected"];
   static readonly #darkQuery = globalThis.matchMedia("(prefers-color-scheme: dark)");
 
   readonly #canvas: HTMLCanvasElement;
@@ -88,9 +137,16 @@ export class MipmapViewer extends HTMLElement {
   #events: string | null = null;
   #eventsOpening: Promise<void> = Promise.resolve();
   #tinter: EventTinter | undefined;
-  #selectedGroups: string[] = [];
-  /** The palette's group colours, for labels. */
-  #unitColours: string[] = [];
+  #selectedGroups = new Set<string>();
+  /** Colours a page set for groups, by id. */
+  #groupColours = new Map<string, string>();
+  /** Colours from the host's custom properties; `groups` holds `--mv-units`. */
+  #basePalette: TracePalette | undefined;
+  /** The ramp's group rows as given to the renderer, for labels. */
+  #rampColours: string[] = [];
+  #groupStyles: GroupStyle[] = [];
+  /** Colour indices for the open layer, kept until the layer or the number of colours changes. */
+  #colourIndex: { tinter: EventTinter; n: number; index: Int32Array } | undefined;
   readonly #controls: Controls;
   #worker: Worker | undefined;
   #renderer: Renderer | undefined;
@@ -127,9 +183,18 @@ export class MipmapViewer extends HTMLElement {
       settled: () => {
         this.#emitViewChange();
       },
+      clearSelection: () => {
+        this.#userSetSelection([]);
+      },
     });
     root.append(style, this.#canvas, this.#labels, this.#status, this.#controls.toolbar, this.#controls.track);
     if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
+    this.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.#selectedGroups.size > 0) {
+        event.preventDefault();
+        this.#userSetSelection([]);
+      }
+    });
   }
 
   get store(): string | null {
@@ -165,13 +230,57 @@ export class MipmapViewer extends HTMLElement {
     return this.#tinter?.groupIds ?? [];
   }
 
-  /** Group ids that alone are coloured, at any zoom; empty colours every group while zoomed in. */
+  /** The open event layer's metadata, with its groups' properties; undefined until it opens. */
+  get eventLayer(): EventLayerInfo | undefined {
+    return this.#tinter?.info;
+  }
+
+  /** Group ids drawn in full colour at any zoom, the rest muted or hidden; empty colours every group alike. */
   get selectedGroups(): string[] {
     return [...this.#selectedGroups];
   }
-  set selectedGroups(ids: string[]) {
-    this.#selectedGroups = [...ids];
+  set selectedGroups(ids: Iterable<string>) {
+    this.#selectedGroups = new Set(ids);
     this.#applySelection();
+  }
+
+  /** Select or deselect one group, toggling without `selected`; returns whether it is now selected. */
+  toggleGroup(id: string, selected?: boolean): boolean {
+    const now = selected ?? !this.#selectedGroups.has(id);
+    if (now) this.#selectedGroups.add(id);
+    else this.#selectedGroups.delete(id);
+    this.#applySelection();
+    return now;
+  }
+
+  /** How groups outside a non-empty selection draw, from the `unselected` attribute. */
+  get unselected(): UnselectedMode {
+    return this.getAttribute("unselected") === "hidden" ? "hidden" : "muted";
+  }
+  set unselected(mode: UnselectedMode) {
+    this.setAttribute("unselected", mode);
+  }
+
+  /** Colours set for groups by id, any CSS colour; others take one from `--mv-units`. */
+  get groupColours(): Record<string, string> {
+    return Object.fromEntries(this.#groupColours);
+  }
+  set groupColours(colours: Record<string, string> | Map<string, string>) {
+    const entries = colours instanceof Map ? [...colours] : Object.entries(colours);
+    this.#groupColours = new Map(entries.map(([id, c]) => [id, normaliseColour(c)]));
+    this.#recolour();
+  }
+
+  /** Set one group's colour, or with null return it to the automatic one. */
+  setGroupColour(id: string, colour: string | null): void {
+    if (colour === null) this.#groupColours.delete(id);
+    else this.#groupColours.set(id, normaliseColour(colour));
+    this.#recolour();
+  }
+
+  /** Each group's colours, in the layer's group order. */
+  get groupStyles(): readonly GroupStyle[] {
+    return this.#groupStyles;
   }
 
   get timeRange(): [number, number] | null {
@@ -226,6 +335,7 @@ export class MipmapViewer extends HTMLElement {
     else if (name === "order") this.order = value as ChannelOrder | null;
     else if (name === "theme") this.#applyTheme();
     else if (name === "events") this.events = value;
+    else if (name === "unselected") this.#applySelection();
   }
 
   get theme(): Theme {
@@ -330,8 +440,8 @@ export class MipmapViewer extends HTMLElement {
         settled: () => {
           this.#emitViewChange();
         },
-        clicked: (_x, y) => {
-          this.#emitChannelClick(y);
+        clicked: (x, y) => {
+          if (!this.#clickGroup(x, y)) this.#emitChannelClick(y);
         },
       });
       this.#status.textContent = info.rawError === null ? "" : `Raw unavailable: ${info.rawError}`;
@@ -344,12 +454,11 @@ export class MipmapViewer extends HTMLElement {
   /** The trace colours the host's custom properties set, with the light defaults for any left empty. */
   #palette(): TracePalette {
     const style = getComputedStyle(this);
-    const get = (name: string, fallback: string): string => style.getPropertyValue(name).trim() || fallback;
-    const groups = get("--mv-units", "")
-      .split(/,(?![^(]*\))/)
-      .map((c) => c.trim())
-      .filter(Boolean);
-    const widths = get("--mv-line-width", "")
+    const get = (name: string, fallback: string): string =>
+      normaliseColour(style.getPropertyValue(name).trim() || fallback);
+    const groups = this.#colourList("--mv-units");
+    const widths = style
+      .getPropertyValue("--mv-line-width")
       .split(/\s+/)
       .map(Number)
       .filter((w) => w > 0);
@@ -364,15 +473,78 @@ export class MipmapViewer extends HTMLElement {
     };
   }
 
+  /** A comma-separated colour list from a custom property; commas inside `rgb()` do not split it. */
+  #colourList(name: string): string[] {
+    return getComputedStyle(this)
+      .getPropertyValue(name)
+      .split(/,(?![^(]*\))/)
+      .map((c) => c.trim())
+      .filter(Boolean)
+      .map(normaliseColour);
+  }
+
   #applyTheme(): void {
     try {
-      const palette = this.#palette();
-      this.#unitColours = palette.groups;
-      this.#tinter?.setColours(palette.groups.length);
-      this.#renderer?.setPalette(palette);
+      this.#basePalette = this.#palette();
+      this.#recolour();
     } catch (err) {
       this.#status.textContent = err instanceof Error ? err.message : String(err);
     }
+  }
+
+  /**
+   * Build the ramp's group rows and point each group at its pair: the units, then their muted variants, then a
+   * colour and muted pair per distinct override.
+   */
+  #recolour(): void {
+    const base = this.#basePalette;
+    if (base === undefined) return;
+    const units = base.groups.slice(0, MAX_GROUP_ROWS / 2);
+    const n = units.length;
+    const mutedCss = this.#colourList("--mv-units-muted");
+    const rows = [...units, ...units.map((c, i) => mutedCss[i] ?? mutedColour(c, base.noise))];
+    const tinter = this.#tinter;
+    if (tinter !== undefined) {
+      if (this.#colourIndex?.tinter !== tinter || this.#colourIndex.n !== n)
+        this.#colourIndex = { tinter, n, index: tinter.assignColours(n) };
+      const { index } = this.#colourIndex;
+      const ids = tinter.groupIds;
+      const row = new Int32Array(ids.length).fill(-1);
+      const mutedRow = new Int32Array(ids.length).fill(-1);
+      const overrideRow = new Map<string, number>();
+      ids.forEach((id, g) => {
+        const own = this.#groupColours.get(id);
+        if (own !== undefined) {
+          let r = overrideRow.get(own);
+          if (r === undefined && rows.length + 2 <= MAX_GROUP_ROWS) {
+            r = rows.length;
+            rows.push(own, mutedColour(own, base.noise));
+            overrideRow.set(own, r);
+          }
+          if (r !== undefined) {
+            row[g] = r;
+            mutedRow[g] = r + 1;
+            return;
+          }
+        }
+        const c = index[g] ?? -1;
+        if (c >= 0) {
+          row[g] = c;
+          mutedRow[g] = n + c;
+        }
+      });
+      tinter.setRows(row, mutedRow);
+      this.#groupStyles = ids.map((id, g) => ({
+        id,
+        colour: rows[row[g] ?? -1] ?? "",
+        muted: rows[mutedRow[g] ?? -1] ?? "",
+      }));
+    } else {
+      this.#groupStyles = [];
+    }
+    this.#rampColours = rows;
+    this.#renderer?.setPalette({ ...base, groups: rows });
+    this.dispatchEvent(new CustomEvent("groupschange", { detail: this.#groupStyles, bubbles: true, composed: true }));
   }
 
   #applyTimeRange(): void {
@@ -390,11 +562,12 @@ export class MipmapViewer extends HTMLElement {
     this.#tinter = undefined;
     renderer?.setTinter(undefined);
     this.#labels.replaceChildren();
+    if (this.#groupStyles.length > 0) this.#recolour();
     if (url === null || url === "" || renderer === undefined || info === undefined) return;
     try {
       const layer = await EventLayer.open(new URL(url, document.baseURI).href);
       if (this.#events !== url || this.#renderer !== renderer) return;
-      const tinter = new EventTinter(layer, info, this.#unitColours.length, {
+      const tinter = new EventTinter(layer, info, {
         onLoaded: () => {
           renderer.redraw();
         },
@@ -403,6 +576,7 @@ export class MipmapViewer extends HTMLElement {
         },
       });
       this.#tinter = tinter;
+      this.#recolour();
       this.#applySelection();
       renderer.setTinter(tinter.tint);
     } catch (err) {
@@ -412,11 +586,62 @@ export class MipmapViewer extends HTMLElement {
   }
 
   #applySelection(): void {
+    this.#controls.setSelection(this.#selectedGroups.size);
     const tinter = this.#tinter;
     if (tinter === undefined) return;
-    const wanted = new Set(this.#selectedGroups);
-    tinter.setSelected(tinter.groupIds.flatMap((id, g) => (wanted.has(id) ? [g] : [])));
+    const wanted = this.#selectedGroups;
+    tinter.setSelected(
+      tinter.groupIds.flatMap((id, g) => (wanted.has(id) ? [g] : [])),
+      this.unselected === "hidden",
+    );
     this.#renderer?.redraw();
+  }
+
+  /** A selection change from the viewer's own UI. */
+  #userSetSelection(ids: Iterable<string>): void {
+    this.selectedGroups = ids;
+    const detail: SelectionChangeDetail = { selectedGroups: this.selectedGroups };
+    this.dispatchEvent(new CustomEvent("selectionchange", { detail, bubbles: true, composed: true }));
+  }
+
+  /** Fire `groupclick` for group `g` and, unless a listener cancels it, toggle the group. */
+  #userClickGroup(g: number): void {
+    const id = this.#tinter?.groupIds[g];
+    if (id === undefined) return;
+    const detail: GroupClickDetail = { groupId: id, selected: this.#selectedGroups.has(id) };
+    const event = new CustomEvent("groupclick", { detail, bubbles: true, composed: true, cancelable: true });
+    if (!this.dispatchEvent(event)) return;
+    const next = new Set(this.#selectedGroups);
+    if (detail.selected) next.delete(id);
+    else next.add(id);
+    this.#userSetSelection(next);
+  }
+
+  /** What the tinter sees: the visible rows from the first partly visible slot, and the slot it starts at. */
+  #tintRequest(): { request: TintRequest; first: number } | undefined {
+    const renderer = this.#renderer;
+    if (renderer === undefined) return undefined;
+    const view = renderer.view;
+    const first = Math.floor(view.firstSlot);
+    const channels = renderer.displayed.slice(first, Math.ceil(view.firstSlot + view.nSlots) + 1);
+    return {
+      request: { t0: view.t0, samplesPerPx: view.samplesPerPx, columns: this.#canvas.width, channels },
+      first,
+    };
+  }
+
+  /** Toggle the group tinted under a click, if any; device pixels. */
+  #clickGroup(xPx: number, yPx: number): boolean {
+    const tinter = this.#tinter;
+    const view = this.#renderer?.view;
+    const at = this.#tintRequest();
+    if (tinter === undefined || view === undefined || at === undefined) return false;
+    const row = Math.floor(view.firstSlot + (yPx / this.#canvas.height) * view.nSlots) - at.first;
+    const slack = CLICK_SLACK_PX * (this.#canvas.width / Math.max(1, this.#canvas.clientWidth));
+    const g = tinter.groupAt(at.request, Math.floor(xPx), row, slack);
+    if (g < 0) return false;
+    this.#userClickGroup(g);
+    return true;
   }
 
   /** Group labels under each event, when zoomed in far enough for them to fit. */
@@ -428,20 +653,24 @@ export class MipmapViewer extends HTMLElement {
       return;
     }
     const view = renderer.view;
-    const width = this.#canvas.width;
-    const first = Math.floor(view.firstSlot);
-    const channels = renderer.displayed.slice(first, Math.ceil(view.firstSlot + view.nSlots) + 1);
-    const labels = tinter.labels({ t0: view.t0, samplesPerPx: view.samplesPerPx, columns: width, channels });
+    const at = this.#tintRequest();
+    if (at === undefined) return;
+    const { request, first } = at;
+    const labels = tinter.labels(request);
     if (labels.length === 0 && this.#labels.childElementCount === 0) return;
-    const ratio = width / Math.max(1, this.#canvas.clientWidth);
+    const ratio = request.columns / Math.max(1, this.#canvas.clientWidth);
     const slotCss = this.#canvas.clientHeight / view.nSlots;
     this.#labels.replaceChildren(
-      ...labels.map(({ x, row, text, colour }) => {
+      ...labels.map(({ x, row, group, text, rampRow, selected }) => {
         const span = document.createElement("span");
         span.textContent = text;
+        span.className = selected ? "selected" : "";
         span.style.left = `${String(x / ratio + 3)}px`;
         span.style.top = `${String((first + row - view.firstSlot + 1) * slotCss - 11)}px`;
-        span.style.color = this.#unitColours[colour] ?? "";
+        span.style.color = this.#rampColours[rampRow] ?? "";
+        span.addEventListener("click", () => {
+          this.#userClickGroup(group);
+        });
         return span;
       }),
     );

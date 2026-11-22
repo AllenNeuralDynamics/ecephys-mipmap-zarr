@@ -73,6 +73,28 @@ export function fromLab([l, a, b]: readonly number[]): [number, number, number] 
 const mixLab = (a: readonly number[], b: readonly number[], t: number): number[] =>
   a.map((v, i) => v + t * ((b[i] ?? 0) - v));
 
+/** Share of a colour's chroma a muted variant keeps, and how far its lightness moves toward the noise. */
+const MUTED_CHROMA = 0.25;
+const MUTED_LIGHTNESS = 0.7;
+
+/** `#rrggbb` for sRGB in 0..1. */
+export function toHex(rgb: readonly number[]): string {
+  return `#${rgb
+    .map((c) =>
+      Math.round(c * 255)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
+
+/** A quieter `colour` for groups drawn beside a selection: less chroma, lightness nearer `noise`'s, same hue. */
+export function mutedColour(colour: string, noise: string): string {
+  const [l, a, b] = toLab(parseColor(colour));
+  const [ln] = toLab(parseColor(noise));
+  return toHex(fromLab([l + MUTED_LIGHTNESS * (ln - l), a * MUTED_CHROMA, b * MUTED_CHROMA]));
+}
+
 /**
  * Ramp rows, premultiplied RGBA8, `RAMP_STEPS` texels each: row 0 ends in `ink`, row k in `groups[k - 1]`.
  * Below `FILL_LEVEL` a texel is the fill colour at partial alpha, so antialiased fringes blend into whatever is

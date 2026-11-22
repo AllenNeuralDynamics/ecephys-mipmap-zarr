@@ -6,6 +6,7 @@ export interface ControlsTarget {
   setOrder(order: ChannelOrder): void;
   /** A control has finished changing the view. */
   settled(): void;
+  clearSelection(): void;
 }
 
 export interface ControlsState {
@@ -23,7 +24,8 @@ export interface ControlsState {
 export const CONTROLS_STYLE = `
 .toolbar { position: absolute; right: 22px; top: 6px; display: flex; gap: 8px; align-items: center;
   font: 12px system-ui, sans-serif; padding: 2px 6px; border-radius: 4px; background: var(--mv-panel); }
-.toolbar select { font: inherit; }
+.toolbar select, .toolbar button { font: inherit; }
+.toolbar button[hidden] { display: none; }
 .track { position: absolute; right: 0; top: 0; bottom: 0; width: 14px; background: var(--mv-track);
   touch-action: none; }
 .thumb { position: absolute; left: 2px; right: 2px; border-radius: 5px; background: var(--mv-thumb); cursor: grab;
@@ -46,6 +48,7 @@ export class Controls {
   readonly #thumb: HTMLDivElement;
   readonly #range: HTMLSpanElement;
   readonly #order: HTMLSelectElement;
+  readonly #selection: HTMLButtonElement;
   #state: ControlsState | undefined;
 
   constructor(readonly target: ControlsTarget) {
@@ -67,7 +70,14 @@ export class Controls {
       this.#order.append(option);
     }
     label.append(this.#order);
-    this.toolbar.append(this.#range, label);
+    this.#selection = document.createElement("button");
+    this.#selection.className = "selection";
+    this.#selection.title = "Clear the selected groups (Esc)";
+    this.#selection.hidden = true;
+    this.#selection.addEventListener("click", () => {
+      target.clearSelection();
+    });
+    this.toolbar.append(this.#range, label, this.#selection);
     this.toolbar.hidden = true;
 
     this.track = document.createElement("div");
@@ -102,6 +112,12 @@ export class Controls {
     this.#order.value = state.order;
     const depth = this.#order.querySelector<HTMLOptionElement>('option[value="depth"]');
     if (depth !== null) depth.disabled = !state.canDepth;
+  }
+
+  /** Show how many event groups are selected, with a button that clears them. */
+  setSelection(count: number): void {
+    this.#selection.hidden = count === 0;
+    this.#selection.textContent = `${String(count)} selected ✕`;
   }
 
   hide(): void {
