@@ -22,6 +22,7 @@ import numpy as np
 import zarr
 
 from ecephys_mipmap_zarr.build import add_pyramid, build_mipmap
+from ecephys_mipmap_zarr.events import EventGroups, write_events
 from ecephys_mipmap_zarr.metadata import BuildConfig, ChunkConfig, EncodingConfig
 from ecephys_mipmap_zarr.read import MipmapStore, open_mipmap
 
@@ -125,6 +126,39 @@ def write_entries(store: MipmapStore, out: Path, name: str) -> list[dict[str, An
     return entries
 
 
+def write_events_fixture(path: Path) -> None:
+    """Write an event layer: a group per channel's spike, plus a group of evenly spaced events on the first channel.
+
+    Its channel ids run backwards and include one no store has, so a reader must map footprints by id.
+    """
+    ids = [f"CH{c + 1}" for c in reversed(range(N_CHANNELS))] + ["CH99"]
+    layer_index = {cid: i for i, cid in enumerate(ids)}
+    spikes = [5_000 + 20_011 * ch for ch in range(N_CHANNELS)]
+    extra = [1_000 + 9_000 * k for k in range(20)]
+    footprint = [
+        [layer_index[f"CH{ch + 1}"], layer_index[f"CH{min(ch, N_CHANNELS - 2) + 2}"], layer_index["CH99"]]
+        for ch in range(N_CHANNELS)
+    ]
+    footprint.append([layer_index["CH1"], -1, -1])
+    weight = [[700.0, 100.0, 50.0]] * N_CHANNELS + [[300.0, 0.0, 0.0]]
+    write_events(
+        path,
+        sample_index=np.array(spikes + extra),
+        group=np.array(list(range(N_CHANNELS)) + [N_CHANNELS] * len(extra)),
+        groups=EventGroups(
+            ids=[f"unit-{ch + 1}" for ch in range(N_CHANNELS)] + ["extra"],
+            footprint_channel=np.array(footprint, np.int32),
+            footprint_weight=np.array(weight, np.float32),
+            properties={"decoder_label": np.array(["sua"] * N_CHANNELS + ["mua"])},
+        ),
+        sampling_frequency=FS,
+        channel_ids=ids,
+        kind="spikes",
+        amplitude=np.array([700.0] * N_CHANNELS + [300.0] * len(extra)),
+        chunk=5,
+    )
+
+
 def write_si_layout_store(path: Path, source: np.ndarray) -> None:
     """Write a SpikeInterface-style Zarr v2 store: ``traces_seg0`` ``(T, C)`` plus channel arrays."""
     root = zarr.open_group(str(path), mode="w", zarr_format=2)
@@ -206,6 +240,7 @@ def main(out: Path) -> None:
             }
         )
 
+    write_events_fixture(out / "events.zarr")
     index = {"n_channels": N_CHANNELS, "n_samples": N_SAMPLES, "stores": stores, "skipped": skipped}
     (out / "index.json").write_text(json.dumps(index, indent=1, sort_keys=True) + "\n")
     print(f"{len(stores)} stores, {sum(len(s['entries']) for s in stores)} entries, {len(skipped)} skipped -> {out}")

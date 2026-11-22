@@ -10,6 +10,7 @@ Usage::
         --n-samples 1000000 --n-channels 384 --dtype float32
     ecephys-mipmap add-pyramid --raw-store raw.zarr --output pyr.zarr --sampling-rate 30000
     ecephys-mipmap info store.zarr
+    ecephys-mipmap events-from-sorting curated/ analyzer.zarr spikes.events.zarr
 """
 
 from __future__ import annotations
@@ -662,11 +663,88 @@ class ViewSettings:
             viewer.show()
 
 
+@dataclass
+class EventsFromSortingSettings:
+    """Write an event layer of sorted spikes, with curation applied, for the web viewer to colour."""
+
+    sorting: PositionalStr
+    """Numpy-folder sorting with ``spikes.npy`` and ``curation.json`` (an AIND sorted asset's ``curated/``)."""
+
+    analyzer: PositionalStr
+    """SpikeInterface zarr analyzer of the same sorting (path or ``s3://`` URI), for templates and amplitudes."""
+
+    output: PositionalStr
+    """Event layer to write."""
+
+    anon: bool = False
+    """Read a remote analyzer without credentials, as public data needs."""
+
+    overwrite: bool = False
+    """Replace an existing output."""
+
+    def cli_cmd(self) -> None:
+        """Run the events-from-sorting command."""
+        from ecephys_mipmap_zarr.events import events_from_sorting, read_analyzer, write_events
+
+        analyzer = read_analyzer(self.analyzer, {"anon": True} if self.anon else None)
+        args = events_from_sorting(self.sorting, **analyzer)
+        write_events(self.output, **args, overwrite=self.overwrite)
+        console.print(f"{args['sample_index'].size:,} spikes in {len(args['groups'].ids)} units → {self.output}")
+
+
+@dataclass
+class EventsFromTableSettings:
+    """Write an event layer from a tab-separated table of detections, one row each."""
+
+    table: PositionalStr
+    """TSV with ``time_s`` and optionally ``peak_channel``, ``peak_uv``, ``width_ms``, ``half_top_um``,
+    ``half_bottom_um``."""
+
+    store: PositionalStr
+    """Mipmap store the times refer to, for its sampling rate, start and channel ids."""
+
+    output: PositionalStr
+    """Event layer to write."""
+
+    group_by: str | None = None
+    """Column whose values become groups."""
+
+    overwrite: bool = False
+    """Replace an existing output."""
+
+    def cli_cmd(self) -> None:
+        """Run the events-from-table command."""
+        import csv
+
+        from ecephys_mipmap_zarr.events import events_from_detections, write_events
+
+        with open(self.table, newline="") as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+        numeric = {"time_s", "peak_channel", "peak_uv", "width_ms", "half_top_um", "half_bottom_um"}
+        columns: dict[str, Any] = {}
+        for name in rows[0].keys() if rows else []:
+            values = [r[name] for r in rows]
+            columns[name] = np.asarray(values, float) if name in numeric else np.asarray(values)
+        store = open_mipmap(self.store)
+        ids = store.channel_ids
+        args = events_from_detections(
+            columns,
+            sampling_frequency=store.sampling_frequency,
+            channel_ids=[str(c) for c in ids] if ids is not None else [str(c) for c in range(store.n_channels)],
+            group_by=self.group_by,
+            t_start=store.t_start,
+        )
+        write_events(self.output, **args, overwrite=self.overwrite)
+        console.print(f"{len(rows):,} events in {len(args['groups'].ids)} groups → {self.output}")
+
+
 CLICommand = Union[  # noqa: UP007 — Union required for tyro.cli() type resolution
     Annotated[BuildSettings, tyro.conf.subcommand(name="build")],
     Annotated[AddPyramidSettings, tyro.conf.subcommand(name="add-pyramid")],
     Annotated[InfoSettings, tyro.conf.subcommand(name="info")],
     Annotated[ViewSettings, tyro.conf.subcommand(name="view")],
+    Annotated[EventsFromSortingSettings, tyro.conf.subcommand(name="events-from-sorting")],
+    Annotated[EventsFromTableSettings, tyro.conf.subcommand(name="events-from-table")],
 ]
 
 

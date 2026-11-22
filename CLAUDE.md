@@ -199,7 +199,8 @@ src/ecephys_mipmap_zarr/
     _engine.py    # write engine: minmax computation, cascade, zarr array factory, LSB shift
     build.py      # public API: build_mipmap, add_pyramid, ensure_pyramid (orchestration only)
     read.py       # get_window, MipmapStore, pyramid-level selection
-    cli.py        # CLI subcommands (build, add-pyramid, info, view)
+    events.py     # event layers (sorted spikes, detections) for the web viewer: format, writer, converters
+    cli.py        # CLI subcommands (build, add-pyramid, info, view, events-from-sorting, events-from-table)
     viewer.py     # Panel+Bokeh interactive trace viewer with spike overlay
 ```
 
