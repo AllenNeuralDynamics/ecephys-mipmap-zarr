@@ -38,6 +38,8 @@ const gain = Number(params.get("gain"));
 if (gain > 0) viewer.gain = gain;
 const events = params.get("events");
 if (events !== null) viewer.events = events;
+const markers = params.get("markers");
+if (markers !== null) viewer.markers = markers;
 const selected = params.get("groups");
 if (selected !== null) viewer.selectedGroups = selected.split(",").filter(Boolean);
 if (params.get("unselected") === "hidden") viewer.unselected = "hidden";

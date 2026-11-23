@@ -1,5 +1,7 @@
 import { EventLayer } from "../events/layer.js";
 import type { EventLayerInfo } from "../events/layer.js";
+import { groupSlots, packColour } from "../events/raster.js";
+import { sampleMapping } from "../events/tint.js";
 import { EventTinter } from "../events/tinter.js";
 import { ReaderClient } from "../reader/client.js";
 import type { StoreInfo } from "../reader/store.js";
@@ -7,8 +9,10 @@ import { DEFAULT_PALETTE, Renderer, type TintRequest } from "../render/renderer.
 import { mutedColour, type TracePalette } from "../render/ramp.js";
 import { viewOfRange, visibleSamples, type View } from "../render/view.js";
 import ReaderWorker from "../reader/worker.ts?worker&inline";
+import { stepMarker, TimeAxis } from "./axis.js";
 import { Controls, CONTROLS_STYLE } from "./controls.js";
 import { attachInteraction } from "./interaction.js";
+import { RasterPanel } from "./raster-panel.js";
 
 export type ChannelOrder = "index" | "depth";
 /** `auto` follows the browser's colour scheme, light when it states none. */
@@ -49,10 +53,20 @@ export interface SelectionChangeDetail {
   selectedGroups: string[];
 }
 
+export interface MarkerClickDetail {
+  /** Position of the marker in the markers layer, from 0. */
+  index: number;
+  /** Seconds from `t_start`. */
+  time: number;
+  groupId: string;
+}
+
 /** Ramp rows the tint's one-byte row index can name, after the ink row. */
 const MAX_GROUP_ROWS = 254;
 /** Columns, CSS px, a click may miss an event's tint by and still pick its group. */
 const CLICK_SLACK_PX = 3;
+/** Most events a markers layer may hold; all of them are fetched at once. */
+const MAX_MARKERS = 100_000;
 
 let colourContext: CanvasRenderingContext2D | null | undefined;
 /** Any CSS colour as `#rrggbb` or `rgba()`, which the ramp parses. */
@@ -86,11 +100,23 @@ const STYLE = `
 :host([theme="dark"]) { ${DARK} }
 :host { display: block; position: relative; min-height: 200px; outline: none; color: var(--mv-text);
   background: var(--mv-bg); }
-canvas { position: absolute; left: 0; top: 0; width: calc(100% - 14px); height: 100%; touch-action: none;
-  cursor: grab; color: var(--mv-ink); }
+.frame { position: absolute; inset: 0; --raster-h: 0px; --axis-h: 18px; }
+.frame.with-raster { --raster-h: var(--mv-raster-height, 25%); }
+.frame.no-axis { --axis-h: 0px; }
+canvas { position: absolute; left: 0; top: 0; width: calc(100% - 14px); touch-action: none; cursor: grab;
+  color: var(--mv-ink); }
 canvas:active { cursor: grabbing; }
-.labels { position: absolute; inset: 0 14px 0 0; overflow: hidden; pointer-events: none;
-  font: 10px system-ui, sans-serif; }
+canvas.traces { height: calc(100% - var(--raster-h) - var(--axis-h)); }
+canvas.raster { top: calc(100% - var(--raster-h) - var(--axis-h)); height: var(--raster-h);
+  border-top: 1px solid var(--mv-track); box-sizing: border-box; }
+canvas.axis { top: calc(100% - var(--axis-h)); height: var(--axis-h); color: var(--mv-text); }
+.frame:not(.with-raster) canvas.raster, .frame.no-axis canvas.axis { display: none; }
+.note { position: absolute; left: 8px; bottom: calc(var(--axis-h) + 4px); font: 11px system-ui, sans-serif;
+  opacity: 0.7; pointer-events: none; }
+.frame:not(.with-raster) .note { display: none; }
+.track { bottom: calc(var(--raster-h) + var(--axis-h)); }
+.labels { position: absolute; inset: 0 14px calc(var(--raster-h) + var(--axis-h)) 0; overflow: hidden;
+  pointer-events: none; font: 10px system-ui, sans-serif; }
 .labels span { position: absolute; white-space: nowrap; line-height: 1; pointer-events: auto; cursor: pointer; }
 .labels span.selected { font-weight: 600; }
 .status { position: absolute; left: 8px; top: 8px; font: 12px system-ui, sans-serif; opacity: 0.7; pointer-events: none; }
@@ -126,17 +152,42 @@ export function depthOrder(info: StoreInfo, channels: readonly number[]): number
  * a cancelable `groupclick`, then toggles the group and fires `selectionchange`; Escape and the toolbar clear the
  * selection. `selectionchange` and `viewchange` report the viewer's own UI only: changes made through properties
  * fire nothing. `groupschange` fires whenever the groups' colours change, from any cause.
+ *
+ * With an event layer open, a raster under the traces (`raster="none"` hides it, `--mv-raster-height` sizes it)
+ * draws every event in view at its group's footprint centre, or on its own channel, across the traces' visible
+ * channels; a click on it toggles the group. Under it a time axis (`axis="none"` hides it) counts seconds from
+ * `t_start` and carries a tick per event of the `markers` layer: `[` and `]` or the toolbar step between them,
+ * and a click on one fires a cancelable `markerclick`, then centres the view on it.
  */
 export class MipmapViewer extends HTMLElement {
-  static readonly observedAttributes = ["store", "gain", "order", "controls", "theme", "events", "unselected"];
+  static readonly observedAttributes = [
+    "store",
+    "gain",
+    "order",
+    "controls",
+    "theme",
+    "events",
+    "unselected",
+    "markers",
+    "raster",
+    "axis",
+  ];
   static readonly #darkQuery = globalThis.matchMedia("(prefers-color-scheme: dark)");
 
   readonly #canvas: HTMLCanvasElement;
+  readonly #frame: HTMLDivElement;
   readonly #status: HTMLDivElement;
   readonly #labels: HTMLDivElement;
+  readonly #note: HTMLDivElement;
+  readonly #raster: RasterPanel;
+  readonly #axis: TimeAxis;
   #events: string | null = null;
   #eventsOpening: Promise<void> = Promise.resolve();
+  #layer: EventLayer | undefined;
   #tinter: EventTinter | undefined;
+  #markersUrl: string | null = null;
+  #markersOpening: Promise<void> = Promise.resolve();
+  #detachPanels: (() => void) | undefined;
   #selectedGroups = new Set<string>();
   /** Colours a page set for groups, by id. */
   #groupColours = new Map<string, string>();
@@ -169,8 +220,26 @@ export class MipmapViewer extends HTMLElement {
     super();
     const root = this.attachShadow({ mode: "open" });
     const style = document.createElement("style");
-    style.textContent = STYLE + CONTROLS_STYLE;
+    style.textContent = CONTROLS_STYLE + STYLE;
     this.#canvas = document.createElement("canvas");
+    this.#canvas.className = "traces";
+    this.#frame = document.createElement("div");
+    this.#frame.className = "frame";
+    const rasterCanvas = document.createElement("canvas");
+    rasterCanvas.className = "raster";
+    const axisCanvas = document.createElement("canvas");
+    axisCanvas.className = "axis";
+    this.#note = document.createElement("div");
+    this.#note.className = "note";
+    this.#raster = new RasterPanel(rasterCanvas, {
+      onError: (err) => {
+        this.#status.textContent = `Raster: ${err instanceof Error ? err.message : String(err)}`;
+      },
+      onNotice: (text) => {
+        if (this.#note.textContent !== text) this.#note.textContent = text;
+      },
+    });
+    this.#axis = new TimeAxis(axisCanvas);
     this.#status = document.createElement("div");
     this.#status.className = "status";
     this.#labels = document.createElement("div");
@@ -186,13 +255,29 @@ export class MipmapViewer extends HTMLElement {
       clearSelection: () => {
         this.#userSetSelection([]);
       },
+      stepMarker: (direction) => {
+        if (this.jumpToMarker(direction) >= 0) this.#emitViewChange();
+      },
     });
-    root.append(style, this.#canvas, this.#labels, this.#status, this.#controls.toolbar, this.#controls.track);
+    this.#frame.append(
+      this.#canvas,
+      rasterCanvas,
+      axisCanvas,
+      this.#labels,
+      this.#note,
+      this.#status,
+      this.#controls.toolbar,
+      this.#controls.track,
+    );
+    root.append(style, this.#frame);
     if (!this.hasAttribute("tabindex")) this.tabIndex = 0;
     this.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.#selectedGroups.size > 0) {
         event.preventDefault();
         this.#userSetSelection([]);
+      } else if ((event.key === "[" || event.key === "]") && this.#axis.markers !== undefined) {
+        event.preventDefault();
+        if (this.jumpToMarker(event.key === "]" ? 1 : -1) >= 0) this.#emitViewChange();
       }
     });
   }
@@ -223,6 +308,30 @@ export class MipmapViewer extends HTMLElement {
     if (url === this.#events) return;
     this.#events = url;
     this.#eventsOpening = this.#openEvents();
+  }
+
+  /** URL of the event layer whose events tick the time axis, or null for none. */
+  get markers(): string | null {
+    return this.#markersUrl;
+  }
+  set markers(url: string | null) {
+    if (url === this.#markersUrl) return;
+    this.#markersUrl = url;
+    this.#markersOpening = this.#openMarkers();
+  }
+
+  /**
+   * Centre the view on the next marker past its centre, or the previous one with -1, keeping the zoom; returns
+   * the marker's position in the layer from 0, or -1 when there is none that way.
+   */
+  jumpToMarker(direction: 1 | -1): number {
+    const markers = this.#axis.markers;
+    const view = this.#renderer?.view;
+    if (markers === undefined || view === undefined) return -1;
+    const centre = view.t0 + (view.samplesPerPx * this.#canvas.width) / 2;
+    const i = stepMarker(markers.sample, centre, direction, view.samplesPerPx);
+    if (i >= 0) this.#centreOn(markers.sample[i] ?? centre);
+    return i;
   }
 
   /** Ids of the event groups the open layer holds. */
@@ -336,6 +445,8 @@ export class MipmapViewer extends HTMLElement {
     else if (name === "theme") this.#applyTheme();
     else if (name === "events") this.events = value;
     else if (name === "unselected") this.#applySelection();
+    else if (name === "markers") this.markers = value;
+    else if (name === "raster" || name === "axis") this.#applyPanels();
   }
 
   get theme(): Theme {
@@ -365,9 +476,11 @@ export class MipmapViewer extends HTMLElement {
   async idle(): Promise<void> {
     await this.#opening;
     await this.#eventsOpening;
+    await this.#markersOpening;
     await this.#renderer?.idle();
     // Events that arrive after a frame redraw it.
     await this.#tinter?.idle();
+    await this.#raster.idle();
     await this.#renderer?.idle();
   }
 
@@ -394,6 +507,11 @@ export class MipmapViewer extends HTMLElement {
 
   #close(): void {
     this.#tinter = undefined;
+    this.#layer = undefined;
+    this.#raster.setLayer(undefined, { scale: 1, offset: 0 }, 1);
+    this.#axis.setMarkers(undefined);
+    this.#detachPanels?.();
+    this.#detachPanels = undefined;
     this.#labels.replaceChildren();
     this.#detach?.();
     this.#detach = undefined;
@@ -427,6 +545,7 @@ export class MipmapViewer extends HTMLElement {
         palette: this.#palette(),
         onDraw: () => {
           this.#drawLabels();
+          this.#drawPanels();
         },
       });
       this.#renderer.setView({ gain: this.#gain });
@@ -444,8 +563,10 @@ export class MipmapViewer extends HTMLElement {
           if (!this.#clickGroup(x, y)) this.#emitChannelClick(y);
         },
       });
+      this.#detachPanels = this.#attachPanels();
       this.#status.textContent = info.rawError === null ? "" : `Raw unavailable: ${info.rawError}`;
       this.#eventsOpening = this.#openEvents();
+      this.#markersOpening = this.#openMarkers();
     } catch (err) {
       if (this.#worker === worker) this.#status.textContent = err instanceof Error ? err.message : String(err);
     }
@@ -487,6 +608,7 @@ export class MipmapViewer extends HTMLElement {
     try {
       this.#basePalette = this.#palette();
       this.#recolour();
+      this.#colourMarkers();
     } catch (err) {
       this.#status.textContent = err instanceof Error ? err.message : String(err);
     }
@@ -544,6 +666,7 @@ export class MipmapViewer extends HTMLElement {
     }
     this.#rampColours = rows;
     this.#renderer?.setPalette({ ...base, groups: rows });
+    this.#styleRaster();
     this.dispatchEvent(new CustomEvent("groupschange", { detail: this.#groupStyles, bubbles: true, composed: true }));
   }
 
@@ -560,7 +683,10 @@ export class MipmapViewer extends HTMLElement {
     const renderer = this.#renderer;
     const info = this.#info;
     this.#tinter = undefined;
+    this.#layer = undefined;
     renderer?.setTinter(undefined);
+    this.#raster.setLayer(undefined, { scale: 1, offset: 0 }, 1);
+    this.#applyPanels();
     this.#labels.replaceChildren();
     if (this.#groupStyles.length > 0) this.#recolour();
     if (url === null || url === "" || renderer === undefined || info === undefined) return;
@@ -576,6 +702,8 @@ export class MipmapViewer extends HTMLElement {
         },
       });
       this.#tinter = tinter;
+      this.#layer = layer;
+      this.#raster.setLayer(layer, sampleMapping(layer.info, info), info.samplingFrequency);
       this.#recolour();
       this.#applySelection();
       renderer.setTinter(tinter.tint);
@@ -594,6 +722,7 @@ export class MipmapViewer extends HTMLElement {
       tinter.groupIds.flatMap((id, g) => (wanted.has(id) ? [g] : [])),
       this.unselected === "hidden",
     );
+    this.#styleRaster();
     this.#renderer?.redraw();
   }
 
@@ -676,6 +805,148 @@ export class MipmapViewer extends HTMLElement {
     );
   }
 
+  /** Show the raster while an event layer is set, and the axis, unless their attributes say `none`. */
+  #applyPanels(): void {
+    const raster = this.#events !== null && this.#events !== "" && this.getAttribute("raster") !== "none";
+    this.#frame.classList.toggle("with-raster", raster);
+    this.#frame.classList.toggle("no-axis", this.getAttribute("axis") === "none");
+  }
+
+  #drawPanels(): void {
+    const view = this.#renderer?.view;
+    const info = this.#info;
+    if (view === undefined || info === undefined) return;
+    this.#raster.draw(view, this.#canvas.width);
+    this.#axis.draw(view, this.#canvas.width, info.samplingFrequency);
+  }
+
+  /** Pan and zoom from the raster and the axis as from the traces; clicks pick a group or a marker. */
+  #attachPanels(): () => void {
+    const common = {
+      element: this as HTMLElement,
+      view: () => this.#renderer?.view,
+      setView: (view: Partial<View>) => this.#renderer?.setView(view),
+      settled: () => {
+        this.#emitViewChange();
+      },
+      keys: false,
+    };
+    const slack = (canvas: HTMLCanvasElement): number =>
+      CLICK_SLACK_PX * (canvas.width / Math.max(1, canvas.clientWidth));
+    const detachRaster = attachInteraction({
+      ...common,
+      canvas: this.#raster.canvas,
+      clicked: (x, y) => {
+        const g = this.#raster.groupAt(x, y, slack(this.#raster.canvas));
+        if (g >= 0) this.#userClickGroup(g);
+      },
+    });
+    const detachAxis = attachInteraction({
+      ...common,
+      canvas: this.#axis.canvas,
+      clicked: (x) => {
+        const i = this.#axis.markerAt(x, slack(this.#axis.canvas));
+        if (i >= 0) this.#userClickMarker(i);
+      },
+    });
+    return () => {
+      detachRaster();
+      detachAxis();
+    };
+  }
+
+  /** The raster's colours and rows for the current groups, selection and displayed channels. */
+  #styleRaster(): void {
+    const layer = this.#layer;
+    const renderer = this.#renderer;
+    const info = this.#info;
+    const base = this.#basePalette;
+    if (layer === undefined || renderer === undefined || info === undefined || base === undefined) return;
+    const slotOf = new Map(renderer.displayed.map((c, slot) => [c, slot]));
+    const byId = new Map(info.channelIds.map((id, c) => [id, c]));
+    const channelSlot = Int32Array.from(layer.info.channelIds, (id) => slotOf.get(byId.get(id) ?? -1) ?? -1);
+    const anySelected = this.#selectedGroups.size > 0;
+    const hidden = this.unselected === "hidden";
+    const ids = layer.info.groups.ids;
+    const colour = new Int32Array(ids.length).fill(-1);
+    const top = new Uint8Array(ids.length);
+    ids.forEach((id, g) => {
+      const style = this.#groupStyles[g];
+      if (style === undefined) return;
+      const selected = this.#selectedGroups.has(id);
+      if (anySelected && !selected && hidden) return;
+      colour[g] = packColour(anySelected && !selected ? style.muted : style.colour);
+      top[g] = selected ? 1 : 0;
+    });
+    this.#raster.setStyle({
+      groupSlot: groupSlots(layer.info.groups, channelSlot),
+      channelSlot,
+      colour,
+      top,
+      background: Math.max(0, packColour(base.background)),
+    });
+  }
+
+  /** Open `markers` for the current store; a later call supersedes an earlier one still opening. */
+  async #openMarkers(): Promise<void> {
+    const url = this.#markersUrl;
+    const info = this.#info;
+    this.#axis.setMarkers(undefined);
+    this.#controls.setMarkers(0);
+    if (url === null || url === "" || info === undefined) return;
+    try {
+      const layer = await EventLayer.open(new URL(url, document.baseURI).href);
+      if (layer.info.nEvents > MAX_MARKERS)
+        throw new Error(`${String(layer.info.nEvents)} events, more than the ${String(MAX_MARKERS)} markers can hold`);
+      const window = await layer.window(-Infinity, Infinity);
+      if (this.#markersUrl !== url || this.#info !== info) return;
+      const { scale, offset } = sampleMapping(layer.info, info);
+      this.#axis.setMarkers({
+        sample: window.sampleIndex.map((s) => s * scale + offset),
+        group: window.group,
+        ids: layer.info.groups.ids,
+        colours: [],
+      });
+      this.#colourMarkers();
+      this.#controls.setMarkers(window.sampleIndex.length);
+    } catch (err) {
+      if (this.#markersUrl === url)
+        this.#status.textContent = `Markers: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+
+  /** Marker groups take the units' colours in turn. */
+  #colourMarkers(): void {
+    const markers = this.#axis.markers;
+    const units = this.#basePalette?.groups ?? [];
+    if (markers === undefined || units.length === 0) return;
+    this.#axis.setMarkers({ ...markers, colours: markers.ids.map((_, g) => units[g % units.length] ?? "") });
+  }
+
+  /** Fire `markerclick` for marker `i` and, unless a listener cancels it, centre the view on it. */
+  #userClickMarker(i: number): void {
+    const markers = this.#axis.markers;
+    const info = this.#info;
+    const sample = markers?.sample[i];
+    if (markers === undefined || info === undefined || sample === undefined) return;
+    const detail: MarkerClickDetail = {
+      index: i,
+      time: sample / info.samplingFrequency,
+      groupId: markers.ids[markers.group[i] ?? -1] ?? "",
+    };
+    const event = new CustomEvent("markerclick", { detail, bubbles: true, composed: true, cancelable: true });
+    if (!this.dispatchEvent(event)) return;
+    this.#centreOn(sample);
+    this.#emitViewChange();
+  }
+
+  /** Centre the view on store sample `sample`, keeping the zoom. */
+  #centreOn(sample: number): void {
+    const view = this.#renderer?.view;
+    if (view === undefined) return;
+    this.#renderer?.setView({ t0: sample - (view.samplesPerPx * this.#canvas.width) / 2 });
+  }
+
   #applyChannels(): void {
     const renderer = this.#renderer;
     const info = this.#info;
@@ -684,6 +955,7 @@ export class MipmapViewer extends HTMLElement {
     renderer.setDisplayed(this.order === "depth" ? depthOrder(info, chosen) : chosen);
     if (this.#channels !== null || this.#rows !== null)
       renderer.setView({ firstSlot: 0, nSlots: this.#rows ?? renderer.displayed.length });
+    this.#styleRaster();
   }
 
   #syncControls(): void {

@@ -9,6 +9,8 @@ export interface InteractionTarget {
   settled(): void;
   /** A click that was not a drag, at device pixels from the canvas's top left. */
   clicked(xPx: number, yPx: number): void;
+  /** Listen for the gain keys on `element`; one of several canvases sharing an element takes them. */
+  keys?: boolean;
 }
 
 /** Wheel zoom per 100 px of wheel delta. */
@@ -101,7 +103,8 @@ export function attachInteraction(target: InteractionTarget): () => void {
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
   canvas.addEventListener("wheel", onWheel, { passive: false });
-  element.addEventListener("keydown", onKey);
+  const keys = target.keys ?? true;
+  if (keys) element.addEventListener("keydown", onKey);
   return () => {
     clearTimeout(settleTimer);
     canvas.removeEventListener("pointerdown", onDown);
@@ -109,6 +112,6 @@ export function attachInteraction(target: InteractionTarget): () => void {
     canvas.removeEventListener("pointerup", onUp);
     canvas.removeEventListener("pointercancel", onUp);
     canvas.removeEventListener("wheel", onWheel);
-    element.removeEventListener("keydown", onKey);
+    if (keys) element.removeEventListener("keydown", onKey);
   };
 }

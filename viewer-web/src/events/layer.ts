@@ -41,6 +41,14 @@ export interface EventWindow {
   widthS?: Float32Array;
 }
 
+/** Events per group in `nBins` bins of `bin` layer samples from bin `b0`, group-major. */
+export interface EventCounts {
+  bin: number;
+  b0: number;
+  nBins: number;
+  data: Uint32Array;
+}
+
 type Column = Exclude<keyof EventWindow, "sampleIndex" | "group">;
 const OPTIONAL: Column[] = ["amplitude", "channel", "depthRange", "widthS"];
 const PATHS: Record<keyof EventWindow, string> = {
@@ -79,16 +87,24 @@ export class EventLayer {
   readonly #firstSample: Float64Array;
   readonly #chunk: number;
   readonly #cache = new Map<number, Promise<EventWindow>>();
+  readonly #counts: Map<number, ZArray>;
 
   private constructor(
     readonly info: EventLayerInfo,
     arrays: Map<keyof EventWindow, ZArray>,
     firstSample: Float64Array,
     chunk: number,
+    counts: Map<number, ZArray>,
   ) {
     this.#arrays = arrays;
     this.#firstSample = firstSample;
     this.#chunk = chunk;
+    this.#counts = counts;
+  }
+
+  /** Bin widths, layer samples, the layer stores per-group counts at; finest first. */
+  get countBins(): number[] {
+    return [...this.#counts.keys()];
   }
 
   /** Open a layer at a URL (`s3://` resolves to HTTPS) or from a store. */
@@ -137,13 +153,51 @@ export class EventLayer {
       k: footprintChannel?.shape[1] ?? 0,
       properties,
     };
+    const counts = new Map<number, ZArray>();
+    const bins = Array.isArray(group.attrs.count_bins) ? group.attrs.count_bins.map(Number) : [];
+    for (const bin of bins.sort((a, b) => a - b)) {
+      const arr = await optional(`counts/b${String(bin)}`);
+      if (arr !== null) counts.set(bin, arr);
+    }
     const sampleIndex = arrays.get("sampleIndex");
     return new EventLayer(
       { ...attrs, groups },
       arrays,
       Float64Array.from(first.data as Float64Array),
       sampleIndex?.chunks[0] ?? 1,
+      counts,
     );
+  }
+
+  /** About how many events have `s0 <= sample < s1`, interpolating within chunks; no fetch. */
+  estimate(s0: number, s1: number): number {
+    return s1 <= s0 ? 0 : Math.max(0, this.#position(s1) - this.#position(s0));
+  }
+
+  /** Fractional event index of sample `s`, linear between chunk starts. */
+  #position(s: number): number {
+    const first = this.#firstSample;
+    const c = upperBound(first, s) - 1;
+    if (c < 0) return 0;
+    const start = first[c] ?? 0;
+    const lastChunk = c === first.length - 1;
+    const size = lastChunk ? this.info.nEvents - c * this.#chunk : this.#chunk;
+    // The last chunk's end is unknown without a fetch; it counts as reached.
+    const next = first[c + 1];
+    const fraction = next === undefined ? 1 : Math.min(1, (s - start) / Math.max(1, next - start));
+    return c * this.#chunk + fraction * size;
+  }
+
+  /** Per-group counts at `bin` over bins `[b0, b1)`, clipped to the stored ones. */
+  async counts(bin: number, b0: number, b1: number): Promise<EventCounts> {
+    const arr = this.#counts.get(bin);
+    if (arr === undefined) throw new Error(`no counts at ${String(bin)} samples`);
+    const total = arr.shape[1] ?? 0;
+    const lo = Math.min(total, Math.max(0, Math.floor(b0)));
+    const hi = Math.min(total, Math.max(lo, Math.ceil(b1)));
+    if (hi === lo) return { bin, b0: lo, nBins: 0, data: new Uint32Array(0) };
+    const out = await zarr.get(arr, [null, zarr.slice(lo, hi)]);
+    return { bin, b0: lo, nBins: hi - lo, data: Uint32Array.from(out.data as Uint32Array) };
   }
 
   /** Events with `s0 <= sample < s1`. */

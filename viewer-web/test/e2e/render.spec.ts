@@ -207,7 +207,10 @@ test("the spike lands in its channel's slot at its sample's column", async ({ pa
   const range: [number, number] = [spikeAt(channel) - 200, spikeAt(channel) + 200];
   const drawn = await render(page, "int16_raw-none_pyr-none", [channel, 2], range, 800);
   const bottoms = drawn.bottom[0] ?? [];
-  const lowest = bottoms.indexOf(Math.max(...bottoms));
+  // A spike clipped at the slot's edge bottoms out flat over a few columns; their middle is the sample's.
+  const deepest = Math.max(...bottoms);
+  const flat = bottoms.flatMap((b, x) => (b === deepest ? [x] : []));
+  const lowest = ((flat[0] ?? 0) + (flat.at(-1) ?? 0)) / 2;
   const { view } = drawn.layout;
   const expected = (spikeAt(channel) + 0.5 - view.t0) / view.samplesPerPx;
   expect(Math.abs(lowest - expected)).toBeLessThanOrEqual(1.5);

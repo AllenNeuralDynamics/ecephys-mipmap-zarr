@@ -7,6 +7,8 @@ export interface ControlsTarget {
   /** A control has finished changing the view. */
   settled(): void;
   clearSelection(): void;
+  /** Centre the view on the next marker, or the previous one with -1. */
+  stepMarker(direction: 1 | -1): void;
 }
 
 export interface ControlsState {
@@ -25,7 +27,8 @@ export const CONTROLS_STYLE = `
 .toolbar { position: absolute; right: 22px; top: 6px; display: flex; gap: 8px; align-items: center;
   font: 12px system-ui, sans-serif; padding: 2px 6px; border-radius: 4px; background: var(--mv-panel); }
 .toolbar select, .toolbar button { font: inherit; }
-.toolbar button[hidden] { display: none; }
+.toolbar button[hidden], .toolbar span[hidden] { display: none; }
+.markers { display: flex; gap: 2px; }
 .track { position: absolute; right: 0; top: 0; bottom: 0; width: 14px; background: var(--mv-track);
   touch-action: none; }
 .thumb { position: absolute; left: 2px; right: 2px; border-radius: 5px; background: var(--mv-thumb); cursor: grab;
@@ -49,6 +52,7 @@ export class Controls {
   readonly #range: HTMLSpanElement;
   readonly #order: HTMLSelectElement;
   readonly #selection: HTMLButtonElement;
+  readonly #markers: HTMLSpanElement;
   #state: ControlsState | undefined;
 
   constructor(readonly target: ControlsTarget) {
@@ -77,7 +81,22 @@ export class Controls {
     this.#selection.addEventListener("click", () => {
       target.clearSelection();
     });
-    this.toolbar.append(this.#range, label, this.#selection);
+    this.#markers = document.createElement("span");
+    this.#markers.className = "markers";
+    this.#markers.hidden = true;
+    for (const [direction, text, title] of [
+      [-1, "◀", "Previous marker ([)"],
+      [1, "▶", "Next marker (])"],
+    ] as const) {
+      const button = document.createElement("button");
+      button.textContent = text;
+      button.title = title;
+      button.addEventListener("click", () => {
+        target.stepMarker(direction);
+      });
+      this.#markers.append(button);
+    }
+    this.toolbar.append(this.#range, label, this.#markers, this.#selection);
     this.toolbar.hidden = true;
 
     this.track = document.createElement("div");
@@ -118,6 +137,11 @@ export class Controls {
   setSelection(count: number): void {
     this.#selection.hidden = count === 0;
     this.#selection.textContent = `${String(count)} selected ✕`;
+  }
+
+  /** Show the marker buttons while there are markers. */
+  setMarkers(count: number): void {
+    this.#markers.hidden = count === 0;
   }
 
   hide(): void {
