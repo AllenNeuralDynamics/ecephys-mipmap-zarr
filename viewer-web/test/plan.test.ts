@@ -26,6 +26,7 @@ const info = (withRaw = true): StoreInfo => ({
   rawSource: null,
   rawPath: null,
   sourceMetadata: null,
+  channelStats: null,
   channelIds: [],
   properties: {},
   rawError: null,

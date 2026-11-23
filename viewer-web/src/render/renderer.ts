@@ -6,6 +6,7 @@ import { Programs } from "./programs.js";
 import { buildRamp, FILL_LEVEL, NOISE_LEVEL, RAMP_STEPS, type TracePalette } from "./ramp.js";
 import { decodeTerms, floatRow, uploadDecode, uploadTile, type TileTexture } from "./textures.js";
 import { clampView, visibleSamples, type View } from "./view.js";
+import { centreAndExcursion, clippedStats, quantile, unitRangeOf } from "./stats.js";
 
 /** Anything that serves tiles: the worker client, or a `TileSource` in-process. */
 export interface TileProvider {
@@ -63,19 +64,6 @@ interface Needed {
 
 const tileId = (key: string, coords: readonly number[]): string => `${key}|${coords.join(",")}`;
 
-/** The `q` quantile of the finite `values`, interpolating between neighbours; NaN when none are finite. */
-function quantile(values: number[], q: number): number {
-  const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
-  if (finite.length === 0) return NaN;
-  const at = q * (finite.length - 1);
-  const below = Math.floor(at);
-  const lo = finite[below] ?? NaN;
-  return lo + (at - below) * ((finite[Math.min(below + 1, finite.length - 1)] ?? lo) - lo);
-}
-
-/** Quantile of a channel's excursion from its centre that reaches the slot's edge at gain 1. */
-const EXCURSION_QUANTILE = 0.95;
-
 /** Sds over which an outline rises from the noise level to full beyond the gate. */
 const OUTLINE_RISE = 2;
 
@@ -88,36 +76,6 @@ export function gateStart(samplesPerPx: number): number {
 }
 /** Extent texels no source reached; past any clamped offset and within half-float range. */
 const EMPTY_EXTENT = 6e4;
-
-/**
- * Mean and standard deviation after repeatedly dropping values beyond 3 sd, so spikes do not count; unlike a
- * median absolute deviation, the sd does not snap to the step of coarsely quantized values.
- */
-function clippedStats(values: Float32Array): { mean: number; sd: number } {
-  let lo = -Infinity;
-  let hi = Infinity;
-  let mean = NaN;
-  let sd = NaN;
-  for (let pass = 0; pass < 5; pass++) {
-    let n = 0;
-    let sum = 0;
-    let squares = 0;
-    // Indexed: a typed array's iterator is several times slower here, and this runs over a whole raw chunk.
-    for (let i = 0; i < values.length; i++) {
-      const v = values[i] ?? NaN;
-      if (v < lo || v > hi) continue;
-      n++;
-      sum += v;
-      squares += v * v;
-    }
-    if (n < 2) return { mean: NaN, sd: NaN };
-    mean = sum / n;
-    sd = Math.sqrt(Math.max(0, squares / n - mean * mean));
-    lo = mean - 3 * sd;
-    hi = mean + 3 * sd;
-  }
-  return { mean, sd };
-}
 
 /**
  * The trace canvas's WebGL2 attributes. A context's attributes are fixed by the first `getContext` call, so a host
@@ -350,6 +308,17 @@ export class Renderer {
     const array = this.#array(this.#coarsest);
     const channels = Array.from({ length: this.info.nChannels }, (_, c) => c);
     const all = this.#tilesCovering(array, channels, 0, array.shape[2] ?? 0);
+    const stored = this.info.channelStats;
+    if (stored !== null) {
+      // The coarsest level is still fetched, as the fallback under every tile in flight, but nothing waits on it.
+      this.#sigma.set(stored.noiseSd);
+      this.#centre = Float32Array.from(stored.centre);
+      this.#unitRange = unitRangeOf(Array.from(stored.excursion));
+      this.#statsReady = true;
+      this.#uploadSlots();
+      for (const need of all) this.#request(need, () => undefined);
+      return;
+    }
     const raw = this.info.arrays.raw;
     const middle = Math.floor(this.info.nSamples / 2);
     const noise = raw === undefined ? [] : this.#tilesCovering(raw, channels, middle, middle + 1);
@@ -398,25 +367,11 @@ export class Renderer {
     }
     const excursions: number[] = [];
     this.#centre = Float32Array.from(lows, (lo, c) => {
-      const hi = highs[c] ?? [];
-      // Block midpoints lean toward a channel's spikes, so a raw baseline is the better centre when there is one.
-      const baseline = this.#baseline[c] ?? NaN;
-      const centre = Number.isFinite(baseline)
-        ? baseline
-        : quantile(
-            lo.map((v, b) => 0.5 * (v + (hi[b] ?? NaN))),
-            0.5,
-          );
-      excursions.push(
-        quantile(
-          lo.map((v, b) => Math.max((hi[b] ?? NaN) - centre, centre - v)),
-          EXCURSION_QUANTILE,
-        ),
-      );
-      return centre || 0;
+      const { centre, excursion } = centreAndExcursion(lo, highs[c] ?? [], this.#baseline[c] ?? NaN);
+      excursions.push(excursion);
+      return centre;
     });
-    const unitRange = 2 * quantile(excursions, 0.5);
-    this.#unitRange = Number.isFinite(unitRange) && unitRange > 0 ? unitRange : 1;
+    this.#unitRange = unitRangeOf(excursions);
     this.#statsReady = true;
     this.#uploadSlots();
     this.#invalidate();

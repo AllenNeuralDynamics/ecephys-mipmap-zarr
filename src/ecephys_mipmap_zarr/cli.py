@@ -10,6 +10,7 @@ Usage::
         --n-samples 1000000 --n-channels 384 --dtype float32
     ecephys-mipmap add-pyramid --raw-store raw.zarr --output pyr.zarr --sampling-rate 30000
     ecephys-mipmap info store.zarr
+    ecephys-mipmap add-stats store.zarr
     ecephys-mipmap events-from-sorting curated/ analyzer.zarr spikes.events.zarr
 """
 
@@ -30,6 +31,7 @@ from rich.table import Table
 from ecephys_mipmap_zarr.build import ProgressCallback, add_pyramid, build_mipmap
 from ecephys_mipmap_zarr.metadata import BuildConfig, EncodingConfig
 from ecephys_mipmap_zarr.read import open_mipmap
+from ecephys_mipmap_zarr.stats import STATS_ATTR, write_channel_stats
 
 console = Console()
 PositionalStr = Annotated[str, tyro.conf.Positional]
@@ -574,6 +576,25 @@ class InfoSettings:
 
 
 @dataclass
+class AddStatsSettings:
+    """Store per-channel display statistics in a mipmap store built before builds wrote them."""
+
+    store_path: PositionalStr
+    """Path to a local mipmap zarr store."""
+
+    def cli_cmd(self) -> None:
+        """Run the add-stats command."""
+        if not Path(self.store_path).is_dir():
+            console.print(f"[red]Error:[/red] {self.store_path} is not a local directory")
+            raise SystemExit(1)
+        stats = write_channel_stats(self.store_path)
+        fs = open_mipmap(self.store_path).sampling_frequency
+        start, stop = (s / fs for s in stats.samples)
+        channels = len(stats.centre)
+        console.print(f"Wrote {STATS_ATTR} for {channels} channels, noise measured over {start:.2f}-{stop:.2f} s")
+
+
+@dataclass
 class ViewSettings:
     """Open a store in the web viewer, served from this machine; --bokeh opens the older Panel viewer."""
 
@@ -799,6 +820,7 @@ CLICommand = Union[  # noqa: UP007 — Union required for tyro.cli() type resolu
     Annotated[BuildSettings, tyro.conf.subcommand(name="build")],
     Annotated[AddPyramidSettings, tyro.conf.subcommand(name="add-pyramid")],
     Annotated[InfoSettings, tyro.conf.subcommand(name="info")],
+    Annotated[AddStatsSettings, tyro.conf.subcommand(name="add-stats")],
     Annotated[ViewSettings, tyro.conf.subcommand(name="view")],
     Annotated[EventsFromSortingSettings, tyro.conf.subcommand(name="events-from-sorting")],
     Annotated[EventsFromTableSettings, tyro.conf.subcommand(name="events-from-table")],

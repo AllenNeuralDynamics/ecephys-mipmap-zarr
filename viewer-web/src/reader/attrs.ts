@@ -15,6 +15,15 @@ export interface RootAttrs {
   rawSource: string | null;
   rawPath: string | null;
   sourceMetadata: unknown;
+  /** Stored per-channel display statistics, in decoded units; null when the store predates them. */
+  channelStats: ChannelStats | null;
+}
+
+/** A store's `channel_stats`, one entry per channel; an unknown excursion is NaN. */
+export interface ChannelStats {
+  centre: Float32Array;
+  noiseSd: Float32Array;
+  excursion: Float32Array;
 }
 
 export class FormatError extends Error {
@@ -44,6 +53,27 @@ function optionalString(attrs: Record<string, unknown>, key: string): string | n
   return value;
 }
 
+function channelList(stats: Record<string, unknown>, key: string, n: number, nullable: boolean): Float32Array {
+  const values = stats[key];
+  if (!Array.isArray(values) || values.length !== n) throw new FormatError(`channel_stats.${key} is not one per channel`);
+  return Float32Array.from(values, (v: unknown) => {
+    if (v === null && nullable) return NaN;
+    if (typeof v !== "number" || !Number.isFinite(v)) throw new FormatError(`channel_stats.${key} holds a non-number`);
+    return v;
+  });
+}
+
+function parseChannelStats(value: unknown, n: number): ChannelStats | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) throw new FormatError("channel_stats is not an object");
+  const stats = value as Record<string, unknown>;
+  return {
+    centre: channelList(stats, "centre", n, false),
+    noiseSd: channelList(stats, "noise_sd", n, false),
+    excursion: channelList(stats, "excursion", n, true),
+  };
+}
+
 /** Parse and validate a store's root attributes; throws `FormatError` on a store this reader cannot decode. */
 export function parseRootAttrs(attrs: Record<string, unknown>): RootAttrs {
   const formatVersion = attrs.format_version === undefined ? 1 : count(attrs, "format_version");
@@ -58,11 +88,12 @@ export function parseRootAttrs(attrs: Record<string, unknown>): RootAttrs {
   }
   const tStart = attrs.t_start ?? null;
   if (tStart !== null && typeof tStart !== "number") throw new FormatError("t_start is not a number");
+  const nChannels = count(attrs, "n_channels");
   return {
     formatVersion,
     samplingFrequency: number(attrs, "sampling_frequency"),
     nSamples: count(attrs, "n_samples"),
-    nChannels: count(attrs, "n_channels"),
+    nChannels,
     strides: [...(strides as number[])].sort((a, b) => a - b),
     units: optionalString(attrs, "units") ?? "",
     dtype: optionalString(attrs, "dtype") ?? "",
@@ -70,5 +101,6 @@ export function parseRootAttrs(attrs: Record<string, unknown>): RootAttrs {
     rawSource: optionalString(attrs, "raw_source"),
     rawPath: optionalString(attrs, "raw_path"),
     sourceMetadata: attrs.source_metadata ?? null,
+    channelStats: parseChannelStats(attrs.channel_stats, nChannels),
   };
 }

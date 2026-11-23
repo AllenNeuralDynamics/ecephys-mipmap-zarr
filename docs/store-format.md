@@ -8,6 +8,20 @@ any version 1 store without knowing how it was built.
 
 Indices here start at 0, as stored. Channel `c` is row `c` of every channel-indexed array.
 
+MUST, MUST NOT, SHOULD and MAY are used in the RFC 2119 sense. A requirement on a store binds the builder
+that wrote it.
+
+## The version changes only when an older reader would misread a store
+
+`format_version` is an integer. It increases when a reader of the previous version would decode a store
+wrongly: an attribute or array removed, renamed or given a new meaning, or a new decoding rule. A
+reader MUST refuse a store whose version is higher than its own.
+
+An addition that an older reader can ignore, such as a new optional attribute or array, does not change
+the version, so that readers already deployed keep opening new stores. A reader MUST ignore root
+attributes, array attributes and arrays it does not know. **Revisions** at the end lists the additions
+made within this version.
+
 ## The store is a Zarr v3 group
 
 The root is a Zarr v3 group, usually with consolidated metadata in its `zarr.json`; a reader uses it when
@@ -37,6 +51,28 @@ builder's choice and outside this contract: a reader takes them from array metad
 | `raw_source` | string or null | Set only in a pyramid-only store: the URI of the store holding raw samples. |
 | `raw_path` | string or null | The raw array's path inside `raw_source`; null means try `raw`, then `traces_seg0`. |
 | `source_metadata` | object or null | Copied from the source, for interpretation only: `probe` (probeinterface `ProbeGroup.to_dict`), `annotations`, `si_chain` (SpikeInterface preprocessing steps, source first). |
+| `channel_stats` | object | Optional. Per-channel display statistics; see below. |
+
+## Channel statistics let a reader scale traces before reading samples
+
+Without them a reader that centres and scales each channel must first read the whole coarsest level
+and a raw chunk for every channel. `channel_stats` holds those measurements in decoded units, each list
+indexed by channel:
+
+| Member | Type | Meaning |
+|---|---|---|
+| `centre` | list of float | Value a channel's trace is centred on: the clipped mean over `samples`, else the median block midpoint `(min + max) / 2` of the coarsest level, else 0. |
+| `noise_sd` | list of float | Clipped standard deviation over `samples`; 0 when the store has no raw samples. |
+| `excursion` | list of float or null | The 0.95 quantile, over the coarsest level's blocks, of `max(max - centre, centre - min)`; null when no block is finite. |
+| `samples` | [int, int] | Raw sample range `[start, stop)` measured: the raw chunk holding sample `n_samples // 2`. `[0, 0]` without raw samples. |
+
+The clipped mean and standard deviation take the population mean and standard deviation, drop values
+more than 3 standard deviations from the mean, and repeat, five passes in all. Unlike a median absolute
+deviation, the result does not snap to the step of coarsely quantized values.
+
+A builder SHOULD write `channel_stats`, and MUST rewrite or remove it when it rewrites `/raw` or the
+coarsest level. A reader MAY use it in place of measuring, and MUST NOT require it: stores written
+before it was added lack it.
 
 ## Arrays hold codes that each array's attributes decode
 
@@ -85,3 +121,11 @@ Which level to draw for a given view is reader policy, outside the format. The P
 coarsest stride with at least 2 blocks per requested point and falls back to raw below the finest; the
 web viewer chooses by pixels on screen. Two conforming readers can draw the same view from different
 levels.
+
+## Revisions
+
+Additions within version 1, which a version 1 reader may ignore:
+
+| Date | Addition |
+|---|---|
+| 2026-11-23 | `channel_stats` root attribute. |

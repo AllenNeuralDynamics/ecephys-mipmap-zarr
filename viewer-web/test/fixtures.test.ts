@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 import type { Codes } from "../src/reader/decode.js";
 import { openStore, type ArrayInfo } from "../src/reader/store.js";
 import { TileSource } from "../src/reader/tiles.js";
+import { centreAndExcursion, clippedStats } from "../src/render/stats.js";
 import { readNpy } from "./npy.js";
 import { readRegion } from "./region.js";
 
@@ -67,6 +68,52 @@ describe.skipIf(index === undefined)("fixture stores decode as Python decodes th
             expect.fail(`${label} element ${String(i)}: got ${String(got.values[i])}, Python ${String(want)}`);
           }
         }
+      }
+    });
+  }
+});
+
+/** Float32 rounding of a stored statistic, plus the decode rounding a sum over a chunk carries. */
+const close = (got: number, want: number): boolean => Math.abs(got - want) <= 1e-5 * Math.max(1, Math.abs(want));
+
+describe.skipIf(index === undefined)("stored channel_stats match what the viewer measures", () => {
+  for (const store of index?.stores ?? []) {
+    test(store.name, async () => {
+      const opened = await openStore(new FileSystemStore(join(FIXTURES, store.path)), {
+        storeFor: (location) => new FileSystemStore(location),
+      });
+      const { info } = opened;
+      const stored = info.channelStats;
+      expect(stored).not.toBeNull();
+      if (stored === null) return;
+      const source = new TileSource(opened);
+      const nC = info.nChannels;
+      const baseline = new Array<number>(nC).fill(NaN);
+      const raw = info.arrays.raw;
+      if (raw !== undefined) {
+        const chunk = raw.chunks[raw.timeMajor ? 0 : 1] ?? 1;
+        const start = Math.floor(Math.floor(info.nSamples / 2) / chunk) * chunk;
+        const stop = Math.min(start + chunk, info.nSamples);
+        const { values } = await readRegion(source, raw, [0, nC], [start, stop]);
+        for (let c = 0; c < nC; c++) {
+          const { mean, sd } = clippedStats(
+            Float32Array.from(values.slice(c * (stop - start), (c + 1) * (stop - start))),
+          );
+          baseline[c] = mean;
+          expect(close(stored.noiseSd[c] ?? NaN, sd), `noise_sd ${String(c)}`).toBe(true);
+        }
+      }
+      const coarsest = info.arrays[`minmax/s${String(Math.max(...info.strides))}`];
+      expect(coarsest).toBeDefined();
+      if (coarsest === undefined) return;
+      const nB = coarsest.shape[2] ?? 0;
+      const { values } = await readRegion(source, coarsest, [0, nC], [0, nB]);
+      for (let c = 0; c < nC; c++) {
+        const lows = values.slice(2 * c * nB, (2 * c + 1) * nB);
+        const highs = values.slice((2 * c + 1) * nB, (2 * c + 2) * nB);
+        const { centre, excursion } = centreAndExcursion(lows, highs, baseline[c] ?? NaN);
+        expect(close(stored.centre[c] ?? NaN, centre), `centre ${String(c)}`).toBe(true);
+        expect(close(stored.excursion[c] ?? NaN, excursion), `excursion ${String(c)}`).toBe(true);
       }
     });
   }

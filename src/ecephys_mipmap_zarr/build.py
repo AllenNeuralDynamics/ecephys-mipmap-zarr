@@ -50,6 +50,7 @@ from ecephys_mipmap_zarr.metadata import (
     MipmapAttrs,
     compute_strides,
 )
+from ecephys_mipmap_zarr.stats import write_channel_stats
 
 __all__ = [
     "ProgressCallback",
@@ -225,9 +226,7 @@ def build_mipmap(
         t_start=t_start,
     )
     root.attrs.update(attrs.to_dict())
-
-    if config.consolidate_metadata:
-        zarr.consolidate_metadata(zarr.storage.LocalStore(str(output)))
+    write_channel_stats(output, consolidate=config.consolidate_metadata)
 
 
 def add_pyramid(
@@ -340,9 +339,7 @@ def add_pyramid(
         t_start=t_start,
     )
     out_root.attrs.update(attrs.to_dict())
-
-    if config.consolidate_metadata:
-        zarr.consolidate_metadata(zarr.storage.LocalStore(str(output)))
+    write_channel_stats(output, consolidate=config.consolidate_metadata)
 
 
 def ensure_pyramid(
