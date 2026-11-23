@@ -223,14 +223,15 @@ for (const [name, halfWidth] of [
   ["raw", 200],
   ["s32", 40_000],
 ] as const) {
-  test(`a spike taller than its slot is clipped there at ${name}`, async ({ page }) => {
+  test(`a spike taller than its slot draws over the channel below at ${name}`, async ({ page }) => {
     const channel = 5;
     const range: [number, number] = [spikeAt(channel) - halfWidth, spikeAt(channel) + halfWidth];
     const drawn = await render(page, "int16_raw-none_pyr-none", [channel, 2], range, 800, 1.5);
     const { view, slotPx } = drawn.layout;
     const column = Math.floor((spikeAt(channel) + 0.5 - view.t0) / view.samplesPerPx);
-    // The spike reaches the bottom of its own slot, and the channel below shows only itself there.
+    // The spike runs through the bottom of its own slot and on into the next one's top.
     expect(drawn.bottom[0]?.[column]).toBeGreaterThanOrEqual(Math.ceil(slotPx) - 2);
-    expect(drawn.top[1]?.[column]).toBeGreaterThan(slotPx * 1.1);
+    expect(drawn.top[1]?.[column]).toBeLessThanOrEqual(Math.ceil(slotPx) + 1);
+    expect(drawn.bottom[1]?.[column]).toBeGreaterThan(slotPx * 1.2);
   });
 }

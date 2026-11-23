@@ -83,8 +83,8 @@ test("an event's group colours its footprint at the event and nowhere else", asy
   expect(own.length).toBeGreaterThan(10);
   expect(Math.min(...own)).toBeGreaterThanOrEqual(400 - 32);
   expect(Math.max(...own)).toBeLessThanOrEqual(400 + 62);
-  // Channel 3 is outside unit 6's footprint.
-  expect(other).toEqual([]);
+  // Channel 3 is outside unit 6's footprint: its slot is tinted only where unit 6's spike runs over it.
+  for (const x of other) expect(x >= Math.min(...own) && x <= Math.max(...own), `column ${String(x)}`).toBe(true);
 });
 
 test("without events nothing is coloured; beside a selection a group is muted, or hidden", async ({ page }) => {

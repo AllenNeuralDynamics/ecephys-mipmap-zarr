@@ -125,6 +125,8 @@ export class Renderer {
   #destroyed = false;
   /** The view last prefetched around. */
   #prefetchedFor: View | undefined;
+  /** MAX blending into float32 works, so levels can carry the row that drew them (`PACK` in the shaders). */
+  readonly #floatBlend: boolean;
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -137,6 +139,7 @@ export class Renderer {
     if (gl.getExtension("EXT_color_buffer_float") === null)
       throw new Error("WebGL2 float render targets are unavailable");
     this.#gl = gl;
+    this.#floatBlend = gl.getExtension("EXT_float_blend") !== null;
     this.#programs = new Programs(gl);
     this.#textures = new ByteLru(options.textureBytes ?? DEFAULT_TEXTURE_BYTES, (_, t) => {
       gl.deleteTexture(t.texture);
@@ -416,7 +419,8 @@ export class Renderer {
     const gl = this.#gl;
     if (this.#levelSize[0] !== width || this.#levelSize[1] !== height) {
       gl.bindTexture(gl.TEXTURE_2D, this.#level);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      if (this.#floatBlend) gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, null);
+      else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
       for (const p of [gl.TEXTURE_MIN_FILTER, gl.TEXTURE_MAG_FILTER]) gl.texParameteri(gl.TEXTURE_2D, p, gl.NEAREST);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.#levelBuffer);
       gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.#level, 0);
@@ -649,7 +653,7 @@ export class Renderer {
       gl.uniform1f(u.u_pxPerUnit, pxPerUnit);
       gl.uniform1i(u.u_row0, first);
       gl.uniform1i(u.u_rows, rows);
-      gl.uniform1f(u.u_limit, 0.5 * slotPx + 4);
+      gl.uniform1f(u.u_limit, height + 4);
       gl.drawArraysInstanced(gl.TRIANGLES, 0, count, texture.nChannels);
     }
     gl.disable(gl.SCISSOR_TEST);
@@ -678,6 +682,8 @@ export class Renderer {
     gl.uniform2f(u.u_gate, gateStart(view.samplesPerPx), OUTLINE_RISE);
     gl.uniform1f(u.u_dim, NOISE_LEVEL);
     gl.uniform1f(u.u_fill, FILL_LEVEL);
+    const packed = this.#floatBlend && rows < 4096;
+    gl.uniform1i(u.u_packed, packed ? 1 : 0);
     gl.drawArraysInstanced(gl.TRIANGLES, 0, width * 18, rows);
     gl.disable(gl.BLEND);
 
@@ -703,6 +709,7 @@ export class Renderer {
     gl.uniform1f(r.u_slotPx, slotPx);
     gl.uniform1i(r.u_row0, first);
     gl.uniform1i(r.u_rows, rows);
+    gl.uniform1i(r.u_packed, packed ? 1 : 0);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 }

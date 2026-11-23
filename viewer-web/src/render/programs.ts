@@ -27,7 +27,7 @@ uniform vec2 u_canvasPx;
 uniform float u_pxPerUnit;
 uniform int u_row0;
 uniform int u_rows;
-// Extremes are clamped just past the slot, where the trace pass clips anyway, to keep half floats precise.
+// Extremes are clamped just past the canvas, where nothing draws, to keep half floats precise.
 uniform float u_limit;
 
 float code(int series, int i) {
@@ -142,10 +142,10 @@ uniform vec2 u_halfWidth;  // device pixels within the noise and past the gate
 uniform vec2 u_gate;  // sds from the centre where the outline starts to brighten, before quantization; sds to full
 uniform float u_dim;  // outline strength inside the noise
 uniform float u_fill;
-flat out vec2 v_band;
 flat out vec4 v_segment;  // ends, device pixels; x < -1e8 marks the fill
 flat out float v_strength;
 flat out float v_halfWidth;
+flat out int v_row;
 
 const vec4 HIDDEN = vec4(2.0, 2.0, 2.0, 1.0);
 const float EMPTY = 1e4;
@@ -168,9 +168,9 @@ void main() {
   int k = gl_VertexID - column * 18;
   vec2 here = texelFetch(u_extent, ivec2(column, row), 0).rg;
   if (here.x > EMPTY) { gl_Position = HIDDEN; return; }
+  v_row = row;
   int slot = u_row0 + row;
   float centre = (float(slot) - u_firstSlot + 0.5) * u_slotPx;
-  v_band = vec2(centre - 0.5 * u_slotPx, centre + 0.5 * u_slotPx);
   vec2 noise = texelFetch(u_sigma, ivec2(slot, 0), 0).rg;
   float x = float(column);
   if (k < 6) {
@@ -208,22 +208,26 @@ void main() {
 
 const TRACE_FRAGMENT = `#version 300 es
 precision highp float;
+// A packed level is its ramp step times PACK plus the visible row that drew it.
+const float PACK = 4096.0;
 uniform highp vec2 u_canvasPx;
-flat in highp vec2 v_band;
 flat in highp vec4 v_segment;
 flat in float v_strength;
 flat in float v_halfWidth;
+flat in int v_row;
+uniform bool u_packed;
 out vec4 level;
 void main() {
   highp vec2 p = vec2(gl_FragCoord.x, u_canvasPx.y - gl_FragCoord.y);
-  if (p.y < v_band.x || p.y > v_band.y) discard;
   float coverage = 1.0;
   if (v_segment.x > -1e8) {
     highp vec2 d = v_segment.zw - v_segment.xy;
     highp float t = dot(d, d) > 0.0 ? clamp(dot(p - v_segment.xy, d) / dot(d, d), 0.0, 1.0) : 0.0;
     coverage = clamp(v_halfWidth + 0.5 - length(p - v_segment.xy - t * d), 0.0, 1.0);
   }
-  level = vec4(coverage * v_strength);
+  // Packed, MAX keeps the strongest step and with it the row that drew it, so a trace over a neighbour's slot
+  // keeps its own tint.
+  level = u_packed ? vec4(floor(coverage * v_strength * 255.0 + 0.5) * PACK + float(v_row)) : vec4(coverage * v_strength);
 }
 `;
 
@@ -241,6 +245,7 @@ void main() {
 
 const RESOLVE_FRAGMENT = `#version 300 es
 precision highp float;
+const float PACK = 4096.0;
 precision highp int;
 uniform highp sampler2D u_level;
 uniform highp sampler2D u_ramp;
@@ -251,16 +256,17 @@ uniform float u_firstSlot;
 uniform float u_slotPx;
 uniform int u_row0;
 uniform int u_rows;
+uniform bool u_packed;
 out vec4 color;
 void main() {
   ivec2 pixel = ivec2(gl_FragCoord.xy);
   float level = texelFetch(u_level, pixel, 0).r;
-  int step = int(level * 255.0 + 0.5);
+  int step = u_packed ? int(level / PACK) : int(level * 255.0 + 0.5);
   vec4 ink = texelFetch(u_ramp, ivec2(step, 0), 0);
   color = ink;
   if (!u_tinted) return;
   float y = u_canvasPx.y - gl_FragCoord.y;
-  int row = int(floor(y / u_slotPx + u_firstSlot)) - u_row0;
+  int row = u_packed ? int(level) - step * int(PACK) : int(floor(y / u_slotPx + u_firstSlot)) - u_row0;
   if (row < 0 || row >= u_rows) return;
   vec2 tint = texelFetch(u_tint, ivec2(pixel.x, row), 0).rg;
   if (tint.g <= 0.0) return;
@@ -296,6 +302,7 @@ export const UNIFORMS = [
   "u_ramp",
   "u_tint",
   "u_tinted",
+  "u_packed",
 ] as const;
 
 export interface Program {
