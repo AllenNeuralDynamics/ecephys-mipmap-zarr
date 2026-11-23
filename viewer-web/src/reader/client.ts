@@ -33,7 +33,7 @@ export class ReaderClient {
     port.start?.();
   }
 
-  #send(request: Request, signal?: AbortSignal): Promise<Response> {
+  #send(request: Exclude<Request, { type: "prefetch" }>, signal?: AbortSignal): Promise<Response> {
     if (signal?.aborted) return Promise.reject(new ReaderError("AbortError", "request aborted"));
     return new Promise((resolve, reject) => {
       this.#waiting.set(request.id, { resolve, reject });
@@ -54,6 +54,15 @@ export class ReaderClient {
     const response = await this.#send({ type: "open", id: this.#nextId++, location });
     if (response.type !== "opened") throw new ReaderError("ProtocolError", `unexpected ${response.type} reply`);
     return response.info;
+  }
+
+  /** Warm the worker's cache with `tiles`, behind any requested tile; replaces the last prefetch. */
+  prefetch(tiles: readonly { key: string; coords: readonly number[] }[]): void {
+    const message: Request = {
+      type: "prefetch",
+      tiles: tiles.map(({ key, coords }) => ({ key, coords: [...coords] })),
+    };
+    this.#port.postMessage(message);
   }
 
   async getTile(key: string, coords: readonly number[], signal?: AbortSignal): Promise<Tile> {

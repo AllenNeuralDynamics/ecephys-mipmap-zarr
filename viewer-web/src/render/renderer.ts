@@ -10,6 +10,8 @@ import { clampView, visibleSamples, type View } from "./view.js";
 /** Anything that serves tiles: the worker client, or a `TileSource` in-process. */
 export interface TileProvider {
   getTile(key: string, coords: readonly number[], signal?: AbortSignal): Promise<Tile>;
+  /** Fetch `tiles` ahead of need, behind any requested tile; replaces the last prefetch. */
+  prefetch?(tiles: readonly { key: string; coords: readonly number[] }[]): void;
 }
 
 export interface RendererOptions {
@@ -163,6 +165,8 @@ export class Renderer {
   #frame: number | null = null;
   #idleWaiters: (() => void)[] = [];
   #destroyed = false;
+  /** The view last prefetched around. */
+  #prefetchedFor: View | undefined;
 
   constructor(
     readonly canvas: HTMLCanvasElement,
@@ -321,7 +325,10 @@ export class Renderer {
       this.#frame = null;
       this.#draw();
       this.options.onDraw?.();
-      if (this.#isIdle()) for (const resolve of this.#idleWaiters.splice(0)) resolve();
+      if (this.#isIdle()) {
+        this.#prefetch();
+        for (const resolve of this.#idleWaiters.splice(0)) resolve();
+      }
     });
   }
 
@@ -496,12 +503,45 @@ export class Renderer {
   }
 
   /** Tiles of `array` covering `channels` and indices `[start, end)`, grouped by channel chunk. */
+  /**
+   * Once the view's tiles are in, ask for what a pan or zoom-out reaches next: a view's width either side at this
+   * level, and three widths of the next coarser level.
+   */
+  #prefetch(): void {
+    const prefetch = this.tiles.prefetch?.bind(this.tiles);
+    const view = this.#view;
+    if (prefetch === undefined || view === this.#prefetchedFor) return;
+    this.#prefetchedFor = view;
+    const width = this.canvas.width;
+    const [s0, s1] = visibleSamples(view, width);
+    const plan = planWindow(this.info, s0, s1, width, this.options.oversample ?? DEFAULT_OVERSAMPLE);
+    const visible = this.#displayed.slice(Math.floor(view.firstSlot), Math.ceil(view.firstSlot + view.nSlots) + 1);
+    if (visible.length === 0) return;
+    const array = this.#array(plan.key);
+    const span = plan.end - plan.start;
+    const wanted = [
+      ...this.#tilesCovering(array, visible, plan.start - span, plan.start),
+      ...this.#tilesCovering(array, visible, plan.end, plan.end + span),
+    ];
+    const coarser = this.info.strides.find((s) => s > array.stride);
+    if (coarser !== undefined) {
+      const level = this.#array(levelKey(coarser));
+      const reach = s1 - s0;
+      wanted.push(
+        ...this.#tilesCovering(level, visible, Math.floor((s0 - reach) / coarser), Math.ceil((s1 + reach) / coarser)),
+      );
+    }
+    prefetch(wanted.filter((n) => this.#texture(n.id) === undefined).map(({ key, coords }) => ({ key, coords })));
+  }
+
   #tilesCovering(array: ArrayInfo, channels: readonly number[], start: number, end: number): Needed[] {
     const { channel, time } = axes(array);
     const chunkC = array.chunks[channel] ?? 1;
     const chunkT = array.chunks[time] ?? 1;
     const chunksC = [...new Set(channels.map((c) => Math.floor(c / chunkC)))].sort((a, b) => a - b);
     const needed: Needed[] = [];
+    start = Math.max(0, start);
+    end = Math.min(array.shape[time] ?? 0, end);
     if (end <= start) return needed;
     for (let tc = Math.floor(start / chunkT); tc * chunkT < end; tc++) {
       for (const cc of chunksC) {

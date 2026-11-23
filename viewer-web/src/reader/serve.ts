@@ -54,6 +54,9 @@ export function serve(port: Port, open: (location: string) => Promise<OpenedStor
       case "abort":
         pending.get(request.id)?.abort();
         break;
+      case "prefetch":
+        source?.prefetch(request.tiles);
+        break;
     }
   });
   port.start?.();

@@ -20,6 +20,7 @@
     "build:app": "vite build --config vite.app.config.ts"
   },
   "dependencies": {
+    "p-queue": "10.0.0",
     "zarrita": "0.7.6"
   },
   "devDependencies": {

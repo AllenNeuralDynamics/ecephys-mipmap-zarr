@@ -5,7 +5,9 @@ import type { Tile } from "./tiles.js";
 export type Request =
   | { type: "open"; id: number; location: string }
   | { type: "tile"; id: number; key: string; coords: number[] }
-  | { type: "abort"; id: number };
+  | { type: "abort"; id: number }
+  /** Fetch these into the worker's cache at low priority, replacing the last prefetch; no reply. */
+  | { type: "prefetch"; tiles: { key: string; coords: number[] }[] };
 
 /** Messages the worker answers with, each naming the request it answers. */
 export type Response =

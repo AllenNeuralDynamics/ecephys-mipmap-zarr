@@ -70,6 +70,53 @@ describe.skipIf(!existsSync(STORE))("TileSource", () => {
     await expect(aborted).rejects.toThrow(/aborted/);
     expect((await kept).coords).toEqual([0, 2]);
   });
+
+  const rawTiles = (from: number, n: number): { key: string; coords: number[] }[] =>
+    Array.from({ length: n }, (_, i) => ({ key: "raw", coords: [0, from + i] }));
+
+  /** Resolves once nothing is fetching: prefetches have no promise to await. */
+  const settle = async (store: CountingStore): Promise<void> => {
+    for (let last = -1; last !== store.ranges;) {
+      last = store.ranges;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+
+  test("a prefetched tile is then served from cache", async () => {
+    const store = new CountingStore();
+    const source = new TileSource(await openStore(store));
+    source.prefetch(rawTiles(10, 3));
+    await settle(store);
+    const fetched = store.ranges;
+    await source.getTile("raw", [0, 11]);
+    expect(store.ranges).toBe(fetched);
+  });
+
+  test("a new prefetch drops queued tiles it no longer names", async () => {
+    const store = new CountingStore();
+    const source = new TileSource(await openStore(store));
+    let release = (): void => undefined;
+    store.gate = new Promise((resolve) => (release = resolve));
+    source.prefetch(rawTiles(0, 40));
+    source.prefetch([]);
+    release();
+    await settle(store);
+    // Only fetches that had started finish: at most the concurrency limit, each a shard index and a chunk read.
+    expect(source.cachedBytes).toBeLessThanOrEqual(6 * 4 * 1024 * 2);
+  });
+
+  test("a requested tile starts ahead of queued prefetches", async () => {
+    const store = new CountingStore();
+    const source = new TileSource(await openStore(store));
+    let release = (): void => undefined;
+    store.gate = new Promise((resolve) => (release = resolve));
+    source.prefetch(rawTiles(0, 40));
+    const wanted = source.getTile("raw", [0, 100]);
+    release();
+    const tile = await wanted;
+    // The six already running and at most the five beside it can have landed, not all forty.
+    expect(source.cachedBytes / tile.codes.byteLength).toBeLessThanOrEqual(12);
+  });
 });
 
 describe.skipIf(!existsSync(STORE))("worker protocol", () => {
