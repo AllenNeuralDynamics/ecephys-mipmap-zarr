@@ -3,7 +3,7 @@
 Layout (Zarr v3)::
 
     /                         attrs: format, format_version, kind, sampling_frequency, t_start,
-                                     channel_ids, window_s, n_events
+                                     channel_ids, window_s, n_events, count_bins
     /sample_index   (N,)      float64, integer-valued and ascending; float so a browser reads it without BigInt
     /group          (N,)      int32, row of /groups
     /amplitude      (N,)      float32, optional
@@ -11,6 +11,8 @@ Layout (Zarr v3)::
     /depth_range    (N, 2)    float32, optional; µm, the probe span the event covers
     /width_s        (N,)      float32, optional; overrides window_s for that event
     /index/first_sample       float64, sample_index of each chunk's first event, to find a window's chunks
+    /counts/b<bin>  (G, B)    uint32, events per group in each run of <bin> samples from sample 0; root attr
+                              count_bins lists the bins, finest first, each 8x the last
     /groups/id      (G,)      str
     /groups/footprint_channel (G, K) int32, index into channel_ids, -1 padding
     /groups/footprint_weight  (G, K) float32, largest first
@@ -55,6 +57,12 @@ DEFAULT_CHUNK = 262_144
 FOOTPRINT_FRACTION = 0.3
 #: Footprint channels kept per unit, largest first.
 FOOTPRINT_MAX = 16
+#: Seconds the finest count bin spans, rounded to a power-of-two number of samples.
+COUNT_BIN_S = 0.125
+#: Each count level's bins span this many of the level below's.
+COUNT_FACTOR = 8
+#: Count levels stop before one would have fewer bins than this.
+MIN_COUNT_BINS = 1024
 
 
 @dataclass(frozen=True)
@@ -195,6 +203,7 @@ def write_events(
         root.create_array(name, data=arr[order].astype(dtype), chunks=(size, *arr.shape[1:]))
     index = root.create_group("index")
     index.create_array("first_sample", data=sorted_samples[::size].copy())
+    root.attrs["count_bins"] = _write_counts(root, sorted_samples, rows[order], len(groups.ids), sampling_frequency)
 
     g = root.create_group("groups")
     _write_string_array(g, "id", np.asarray([str(i) for i in groups.ids]))
@@ -212,6 +221,34 @@ def write_events(
     return root
 
 
+def _count_bins(n_samples: int, sampling_frequency: float) -> list[int]:
+    """Bin widths, samples, of a layer's count levels: the finest near ``COUNT_BIN_S``, then 8x coarser each."""
+    bins = [2 ** max(0, round(np.log2(COUNT_BIN_S * sampling_frequency)))]
+    while -(-n_samples // (bins[-1] * COUNT_FACTOR)) >= MIN_COUNT_BINS:
+        bins.append(bins[-1] * COUNT_FACTOR)
+    return bins
+
+
+def _write_counts(
+    root: zarr.Group, samples: npt.NDArray[Any], rows: npt.NDArray[Any], n_groups: int, sampling_frequency: float
+) -> list[int]:
+    """Write per-group event counts at each bin of :func:`_count_bins`, so a viewer can draw a long span unfetched."""
+    keep = samples >= 0
+    samples, rows = samples[keep].astype(np.int64), rows[keep].astype(np.int64)
+    n_samples = int(samples[-1]) + 1 if samples.size else 1
+    bins = _count_bins(n_samples, sampling_frequency)
+    counts = root.create_group("counts")
+    for b in bins:
+        n_bins = -(-n_samples // b)
+        flat = np.bincount(rows * n_bins + samples // b, minlength=n_groups * n_bins)
+        counts.create_array(
+            f"b{b}",
+            data=flat.reshape(n_groups, n_bins).astype(np.uint32),
+            chunks=(max(1, min(n_groups, 256)), min(n_bins, 1024)),
+        )
+    return bins
+
+
 def _read(group: zarr.Group, name: str) -> npt.NDArray[Any]:
     arr = group[name]
     if not isinstance(arr, zarr.Array):
@@ -220,7 +257,7 @@ def _read(group: zarr.Group, name: str) -> npt.NDArray[Any]:
 
 
 def read_events(path: str | Path) -> dict[str, Any]:
-    """Read a whole event layer into memory: its attrs, per-event arrays and ``groups``."""
+    """Read a whole event layer into memory: its attrs, per-event arrays, ``groups`` and ``counts`` by bin."""
     root = zarr.open_group(str(path), mode="r")
     attrs = dict(root.attrs)
     if attrs.get("format") != EVENTS_FORMAT:
@@ -243,6 +280,8 @@ def read_events(path: str | Path) -> dict[str, Any]:
     for name in ("footprint_channel", "footprint_weight"):
         if name in g:
             out["groups"][name] = _read(g, name)
+    bins = attrs.get("count_bins", [])
+    out["counts"] = {int(b): _read(root, f"counts/b{b}") for b in bins} if isinstance(bins, list) else {}
     return out
 
 

@@ -134,3 +134,23 @@ def test_detections_group_by_a_column(tmp_path: Path) -> None:
     np.testing.assert_array_equal(out["channel"], [1, 3])
     np.testing.assert_allclose(out["width_s"], [0.03, 0.02])
     np.testing.assert_array_equal(out["depth_range"], [[150, 300], [100, 200]])
+
+
+def test_counts_bin_each_groups_events_at_each_level(tmp_path: Path) -> None:
+    rng = np.random.default_rng(0)
+    samples = np.sort(rng.integers(0, 3_000_000, 5000))
+    rows = rng.integers(0, 3, samples.size)
+    out = read_events(_write(tmp_path, sample_index=samples, group=rows, groups=EventGroups(ids=["a", "b", "c"])))
+    bins = out["attrs"]["count_bins"]
+    # 0.125 s at 30 kHz rounds to 4096 samples; 3e6 samples give 733 bins, too few for a coarser level.
+    assert bins == [4096]
+    counts = out["counts"][4096]
+    assert counts.shape == (3, -(-int(samples[-1] + 1) // 4096))
+    for g in range(3):
+        np.testing.assert_array_equal(counts[g], np.bincount(samples[rows == g] // 4096, minlength=counts.shape[1]))
+
+
+def test_counts_add_coarser_levels_while_they_keep_enough_bins(tmp_path: Path) -> None:
+    out = read_events(_write(tmp_path, sample_index=np.array([0, 40_000_000]), group=np.array([0, 1])))
+    assert out["attrs"]["count_bins"] == [4096, 32768]
+    assert out["counts"][32768].sum() == 2
