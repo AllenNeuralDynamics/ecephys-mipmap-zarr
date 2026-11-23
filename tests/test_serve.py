@@ -76,6 +76,16 @@ def test_serves_store_files_whole_or_by_range(server: ViewerServer) -> None:
     assert status == 416
 
 
+def test_an_unchanged_file_revalidates_to_304_and_a_rewritten_one_does_not(server: ViewerServer, store: Path) -> None:
+    status, headers, _ = _get(server, "data/0/rec.zarr/raw/c/0")
+    etag = headers["ETag"]
+    assert (status, headers["Cache-Control"]) == (200, "no-cache")
+    assert _get(server, "data/0/rec.zarr/raw/c/0", {"If-None-Match": etag})[0] == 304
+    (store / "raw" / "c" / "0").write_bytes(bytes(range(255)))
+    status, _, body = _get(server, "data/0/rec.zarr/raw/c/0", {"If-None-Match": etag})
+    assert (status, len(body)) == (200, 255)
+
+
 def test_missing_keys_and_paths_outside_a_mount_are_404(server: ViewerServer) -> None:
     assert _get(server, "data/0/rec.zarr/raw/c/9")[0] == 404
     assert _get(server, "data/0/rec.zarr/../secret.txt")[0] == 404

@@ -130,7 +130,16 @@ class _Handler(BaseHTTPRequestHandler):
             # zarr reads a missing key's 404 as absent.
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        size = path.stat().st_size
+        stat = path.stat()
+        size = stat.st_size
+        # Stores can be rewritten in place, so the browser revalidates each time; an unchanged file costs a 304.
+        etag = f'"{stat.st_mtime_ns:x}-{size:x}"'
+        if etag in (self.headers.get("If-None-Match") or "").split(", "):
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
         span = _byte_range(self.headers.get("Range"), size)
         if span is not None and span[0] >= size:
             self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
@@ -142,6 +151,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", _TYPES.get(path.suffix, "application/octet-stream"))
         self.send_header("Content-Length", str(max(0, end - start + 1)))
         self.send_header("Accept-Ranges", "bytes")
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
         if span is not None:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
