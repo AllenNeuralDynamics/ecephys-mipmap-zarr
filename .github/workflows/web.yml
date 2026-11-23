@@ -40,3 +40,6 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run e2e
       - run: npm run build
+      # The package build runs the app build through hatch_build.py; check the wheel carries it.
+      - run: uv build -o "$RUNNER_TEMP/dist" && unzip -l "$RUNNER_TEMP"/dist/*.whl | grep -q static/viewer/viewer.js
+        working-directory: .

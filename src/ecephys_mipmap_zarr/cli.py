@@ -575,42 +575,99 @@ class InfoSettings:
 
 @dataclass
 class ViewSettings:
-    """Launch the interactive trace viewer in a browser tab."""
+    """Open a store in the web viewer, served from this machine; --bokeh opens the older Panel viewer."""
 
     store_path: PositionalStr
-    """Path to mipmap zarr store."""
+    """Mipmap store: a local directory or a URL."""
+    events: str | None = None
+    """Event layer whose groups colour the traces and fill the raster: a local directory or a URL."""
+    markers: str | None = None
+    """Event layer whose events tick the time axis, to step between: a local directory or a URL."""
     channels: list[int] | None = None
     """Channel indices to display."""
-    n_channels: int = 32
-    """Number of channels to display."""
-    channel_order: str | None = "depth"
-    """Channel display order: 'depth' (default, by probe position), 'index' (by channel number)."""
-    width: int = 1200
-    """Figure width in pixels."""
-    height: int = 800
-    """Figure height in pixels."""
-    cache_dir: str | None = None
-    """Cache directory for remote stores (auto-detected if omitted)."""
-    cache_max_gb: float = 10
-    """Maximum cache size in GB."""
-    spikes_from: str | None = None
-    """Path to phy/Kilosort output directory for spike overlay."""
-    units: list[int] | None = None
-    """Unit IDs to display (default: all). Channels auto-selected from spike templates."""
+    channel_order: str | None = None
+    """Channel display order: 'depth' (by probe position; the default when the store has locations) or 'index'."""
     remote: bool = False
     """Serve for access through a reverse proxy (cloud IDE / JupyterHub); binds on 0.0.0.0, no auto browser."""
     port: int | None = None
-    """Fixed bind port (only with --remote; default: Panel picks free)."""
+    """Fixed bind port (default: a free one locally, 5006 with --remote)."""
     url_prefix: str | None = None
-    """External URL prefix for jupyter-server-proxy mounts (only with --remote)."""
+    """External URL prefix the proxy mounts the viewer under, for the printed link (only with --remote)."""
+    open_browser: bool = True
+    """Open the page in a browser (not with --remote)."""
+    bokeh: bool = False
+    """Use the Panel + Bokeh viewer; the options below apply to it only."""
+    n_channels: int = 32
+    """Number of channels to display (--bokeh)."""
+    width: int = 1200
+    """Figure width in pixels (--bokeh)."""
+    height: int = 800
+    """Figure height in pixels (--bokeh)."""
+    cache_dir: str | None = None
+    """Cache directory for remote stores, auto-detected if omitted (--bokeh)."""
+    cache_max_gb: float = 10
+    """Maximum cache size in GB (--bokeh)."""
+    spikes_from: str | None = None
+    """Path to phy/Kilosort output directory for spike overlay (--bokeh)."""
+    units: list[int] | None = None
+    """Unit IDs to display, default all; channels auto-selected from spike templates (--bokeh)."""
     allow_origin: list[str] | None = None
-    """Allowed websocket Origin hostnames (only with --remote; default: wildcard with warning)."""
+    """Allowed websocket Origin hostnames, default wildcard with warning (--bokeh with --remote)."""
 
     def cli_cmd(self) -> None:
         """Run the view command."""
+        if self.bokeh:
+            self._bokeh()
+        else:
+            self._web()
+
+    def _web(self) -> None:
+        from ecephys_mipmap_zarr.serve import DEFAULT_REMOTE_PORT, ViewerServer, proxy_base
+
+        ignored = [
+            flag
+            for flag, value in (
+                ("--spikes-from", self.spikes_from),
+                ("--units", self.units),
+                ("--cache-dir", self.cache_dir),
+                ("--allow-origin", self.allow_origin),
+            )
+            if value is not None
+        ]
+        if ignored:
+            console.print(f"[yellow]Warning:[/yellow] {', '.join(ignored)} apply to --bokeh only; ignoring.")
+        if not self.remote and self.url_prefix is not None:
+            console.print("[yellow]Warning:[/yellow] --url-prefix requires --remote; ignoring.")
+        params: dict[str, str] = {}
+        if self.channels is not None:
+            params["channels"] = ",".join(str(c) for c in self.channels)
+        if self.channel_order is not None:
+            params["order"] = self.channel_order
+        port = self.port if self.port is not None else DEFAULT_REMOTE_PORT if self.remote else 0
+        try:
+            server = ViewerServer(
+                self.store_path,
+                events=self.events,
+                markers=self.markers,
+                params=params,
+                host="0.0.0.0" if self.remote else "127.0.0.1",
+                port=port,
+            )
+        except FileNotFoundError as err:
+            # A missing store or an unbuilt bundle: the message says which.
+            console.print(f"[red]Error:[/red] {err}", soft_wrap=True)
+            raise SystemExit(1) from None
+        base = proxy_base(server.port, self.url_prefix) if self.remote else None
+        console.print(f"Serving the viewer at {server.url(base)}", soft_wrap=True)
+        console.print("Press Ctrl+C to stop.")
+        server.serve_forever(open_browser=self.open_browser and not self.remote)
+
+    def _bokeh(self) -> None:
         from ecephys_mipmap_zarr.read import open_mipmap
         from ecephys_mipmap_zarr.viewer import RemoteConfig, TraceViewer, load_phy_spikes
 
+        if self.events is not None or self.markers is not None:
+            console.print("[yellow]Warning:[/yellow] --events/--markers apply to the web viewer only; ignoring.")
         store = open_mipmap(self.store_path, cache_dir=self.cache_dir, cache_max_gb=self.cache_max_gb)
         console.print(f"Opening viewer: {self.store_path}")
         console.print(f"  {store.n_samples:,} samples, {store.n_channels} channels, {store.sampling_frequency:.0f} Hz")
@@ -640,7 +697,7 @@ class ViewSettings:
             store,
             channels=self.channels,
             n_channels=self.n_channels,
-            channel_order=self.channel_order,
+            channel_order=self.channel_order or "depth",
             initial_channels=initial_channels,
             width=self.width,
             height=self.height,

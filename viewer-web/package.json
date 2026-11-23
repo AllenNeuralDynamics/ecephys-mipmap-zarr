@@ -16,7 +16,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "e2e": "playwright test",
-    "fixtures": "cd .. && uv run python -I scripts/make_fixtures.py"
+    "fixtures": "cd .. && uv run python -I scripts/make_fixtures.py",
+    "build:app": "vite build --config vite.app.config.ts"
   },
   "dependencies": {
     "zarrita": "0.7.6"

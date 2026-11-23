@@ -118,9 +118,19 @@ ecephys-mipmap add-pyramid \
 # Inspect a mipmap store
 ecephys-mipmap info mipmap.zarr
 
-# Launch the viewer
-ecephys-mipmap view mipmap.zarr
+# Write event layers: a sorting's spikes, or a table of times
+ecephys-mipmap events-from-sorting sorting/ analyzer.zarr spikes.events.zarr
+ecephys-mipmap events-from-table detections.tsv mipmap.zarr detections.events.zarr
+
+# Open the web viewer, with spikes colouring the traces and filling the raster, and detections on the time axis
+ecephys-mipmap view mipmap.zarr --events spikes.events.zarr --markers detections.events.zarr
+
+# Behind a reverse proxy (cloud IDE, JupyterHub)
+ecephys-mipmap view mipmap.zarr --remote
 ```
+
+Stores and layers can be local directories or URLs. Local ones are served by `ecephys-mipmap view`; URLs are fetched
+by the browser directly, so they need CORS. `--bokeh` opens the older Panel + Bokeh viewer.
 
 ## Zarr layout
 
@@ -147,6 +157,13 @@ ecephys-mipmap view mipmap.zarr
 ```bash
 uv sync
 ./scripts/run_linters_and_checks.sh -c
+```
+
+Wheels and sdists carry the web viewer, built by `hatch_build.py`, so building them needs node >= 22.12. An editable
+install (`uv sync`) skips that; build the viewer once for `ecephys-mipmap view` with:
+
+```bash
+cd viewer-web && npm ci && npm run build:app
 ```
 
 ## License
