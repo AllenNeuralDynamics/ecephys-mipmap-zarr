@@ -1152,6 +1152,9 @@ class TestBuildMipmapLsbShift:
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
         assert root["raw"].dtype == np.int8  # clipped to fit
+        # Both outliers land in one block of every level, as its min and its max.
+        for path in ["raw", *(f"minmax/s{s}" for s in root.attrs["strides"])]:  # type: ignore[union-attr]
+            assert root[path].attrs["clipped_values"] == 2, path
 
     def test_no_clip_keeps_int16(self, tmp_path):
         """With outliers and clip_outliers=False, store stays int16."""
@@ -1174,6 +1177,7 @@ class TestBuildMipmapLsbShift:
 
         root = zarr.open_group(str(out), mode="r", use_consolidated=None)
         assert root["raw"].dtype == np.int16  # kept int16
+        assert "clipped_values" not in root["raw"].attrs
 
 
 # ---------------------------------------------------------------------------

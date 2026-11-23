@@ -47,6 +47,8 @@ log = logging.getLogger(__name__)
 _SAMPLE_SAMPLES = 30_000
 # Largest fraction of an array clip_outliers will clip to fit int8.
 _CLIP_THRESHOLD = 0.0001
+#: Array attribute counting the codes clipping changed, present only on an array that was clipped.
+CLIPPED_ATTR = "clipped_values"
 # "auto" pyramid shift over the raw one: pyramids are only drawn.
 _PYRAMID_DISPLAY_BITS = 2
 
@@ -239,8 +241,8 @@ def _convert_array_to_int8(
     is_pyramid : bool, optional
         Whether this is a pyramid array.
     clip : bool, optional
-        When ``True``, clip values to [-128, 127] before casting.
-        When ``False`` (default), values must already fit in int8.
+        When ``True``, clip values to [-128, 127] before casting and record how many were clipped in the
+        array's :data:`CLIPPED_ATTR`. When ``False`` (default), values must already fit in int8.
     """
     old_arr: zarr.Array = root[path]  # type: ignore[assignment]
     shape = old_arr.shape
@@ -263,14 +265,18 @@ def _convert_array_to_int8(
     last_axis = len(shape) - 1
     shard_len = shards[last_axis]
     total = shape[last_axis]
+    clipped = 0
     for i0 in range(0, total, shard_len):
         i1 = min(i0 + shard_len, total)
         sl = (slice(None), slice(i0, i1)) if last_axis == 1 else (slice(None), slice(None), slice(i0, i1))
         data = np.asarray(old_arr[sl])
         if clip:
+            clipped += int(((data < -128) | (data > 127)).sum())
             data = np.clip(data, -128, 127)
         tmp_arr[sl] = data.astype(np.int8)
 
+    if clip:
+        old_attrs[CLIPPED_ATTR] = clipped
     if old_attrs:
         tmp_arr.attrs.update(old_attrs)
 

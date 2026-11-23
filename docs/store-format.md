@@ -90,6 +90,10 @@ Every one of these arrays decodes by its own attributes, in this order:
 2. **`lsb_shift`** present: `value = code * 2**lsb_shift`.
 3. Neither: `value = code`.
 
+An array whose values were clipped to fit its dtype carries **`clipped_values`**: the number of codes
+clipping changed, each now at the dtype's limit. A decoded value at the limit of such an array is a lower bound
+on the magnitude it stands for. An array without the attribute was not clipped.
+
 A reader ignores the other array attributes (`source_dtype`, `quantized_dtype`, `original_dtype`). Codes
 are stored as `int8`, `uint8`, `int16`, `uint16`, `float32` or the source's dtype. Levels usually share
 decode parameters, but a reader decodes each level by its own attributes rather than assuming so.
@@ -129,3 +133,4 @@ Additions within version 1, which a version 1 reader may ignore:
 | Date | Addition |
 |---|---|
 | 2026-11-23 | `channel_stats` root attribute. |
+| 2026-11-23 | `clipped_values` array attribute. |
