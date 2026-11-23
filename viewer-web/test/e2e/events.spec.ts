@@ -9,6 +9,7 @@ interface Setup {
   selected?: string[];
   unselected?: "muted" | "hidden";
   colours?: Record<string, string>;
+  visible?: string[];
   markers?: string;
   raster?: "none";
 }
@@ -33,6 +34,7 @@ async function open(page: Page, setup: Setup): Promise<void> {
       viewer.events = setup.events;
       viewer.selectedGroups = setup.selected ?? [];
       viewer.groupColours = setup.colours ?? {};
+      viewer.visibleGroups = setup.visible ?? null;
       viewer.store = "/test/fixtures/int16_raw-none_pyr-none.zarr";
       viewer.timeRange = range;
       await viewer.idle();
@@ -103,6 +105,36 @@ test("without events nothing is coloured; beside a selection a group is muted, o
   expect(muted).toBeGreaterThan(0.03);
   expect(muted).toBeLessThan(selected / 2);
   expect(hidden).toBeLessThanOrEqual(0);
+});
+
+test("a group outside visibleGroups draws nothing, even selected, and is never clicked", async ({ page }) => {
+  await open(page, { events: EVENTS, visible: ["unit-1", "unit-6"] });
+  expect((await tinted(page)).columns[0]?.length).toBeGreaterThan(10);
+  await open(page, { events: EVENTS, visible: ["unit-1"], selected: ["unit-6"] });
+  expect((await tinted(page)).columns.flat()).toEqual([]);
+  const styles = await page.evaluate(() => document.querySelector("mipmap-viewer")?.groupStyles);
+  expect(styles?.find((s) => s.id === "unit-6")?.colour).toBe("");
+  expect(styles?.find((s) => s.id === "unit-1")?.colour).not.toBe("");
+  const hit = await page.evaluate(() => {
+    const viewer = document.querySelector("mipmap-viewer");
+    const canvas = viewer?.shadowRoot?.querySelector("canvas");
+    if (viewer === null || canvas === null || canvas === undefined) throw new Error("no viewer");
+    const out: string[] = [];
+    viewer.addEventListener("groupclick", (e) => out.push((e as CustomEvent<{ groupId: string }>).detail.groupId));
+    viewer.addEventListener("channelclick", () => out.push("channel"));
+    // Where the spike's tint sits on its own channel when unit-6 is shown (the click test's spot).
+    const rect = canvas.getBoundingClientRect();
+    const init = {
+      clientX: rect.left + 0.52 * rect.width,
+      clientY: rect.top + 0.25 * rect.height,
+      button: 0,
+      pointerId: 1,
+    };
+    canvas.dispatchEvent(new PointerEvent("pointerdown", { ...init, bubbles: true }));
+    canvas.dispatchEvent(new PointerEvent("pointerup", { ...init, bubbles: true }));
+    return out;
+  });
+  expect(hit).toEqual(["channel"]);
 });
 
 test("a set colour replaces the group's own", async ({ page }) => {

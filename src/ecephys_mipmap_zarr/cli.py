@@ -604,6 +604,9 @@ class ViewSettings:
     """Event layer whose groups colour the traces and fill the raster: a local directory or a URL."""
     markers: str | None = None
     """Event layer whose events tick the time axis, to step between: a local directory or a URL."""
+    filter: str | None = None
+    """Draw only the event groups whose properties match, e.g. 'KSLabel:good,decoder_label:sua|mua' (all of the
+    comma-joined properties, any of the bar-joined values)."""
     channels: list[int] | None = None
     """Channel indices to display."""
     channel_order: str | None = None
@@ -664,6 +667,8 @@ class ViewSettings:
             params["channels"] = ",".join(str(c) for c in self.channels)
         if self.channel_order is not None:
             params["order"] = self.channel_order
+        if self.filter is not None:
+            params["filter"] = self.filter
         port = self.port if self.port is not None else DEFAULT_REMOTE_PORT if self.remote else 0
         try:
             server = ViewerServer(

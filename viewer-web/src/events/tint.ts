@@ -84,8 +84,28 @@ export function footprintOverlap(groups: EventGroups, positions: ArrayLike<numbe
  * Greedy, most-overlapped group first: each takes the colour whose groups it overlaps least, ties going to the
  * colour used least so far. Groups without footprints take the least-used colour.
  */
-export function assignColours(groups: EventGroups, nColours: number, positions: ArrayLike<number> | null): Int32Array {
-  return colourGraph(footprintOverlap(groups, positions), nColours);
+export function assignColours(
+  groups: EventGroups,
+  nColours: number,
+  positions: ArrayLike<number> | null,
+  shown?: ReadonlySet<number>,
+): Int32Array {
+  const overlap = footprintOverlap(groups, positions);
+  if (shown === undefined) return colourGraph(overlap, nColours);
+  // Colour the shown groups among themselves, so hidden ones neither take colours nor push neighbours apart.
+  const kept = [...shown].filter((g) => g >= 0 && g < overlap.length).sort((x, y) => x - y);
+  const at = new Map(kept.map((g, i) => [g, i]));
+  const sub = kept.map((g) => {
+    const m = new Map<number, number>();
+    for (const [h, v] of overlap[g] ?? []) {
+      const j = at.get(h);
+      if (j !== undefined) m.set(j, v);
+    }
+    return m;
+  });
+  const colours = new Int32Array(overlap.length).fill(-1);
+  colourGraph(sub, nColours).forEach((c, i) => (colours[kept[i] ?? -1] = c));
+  return colours;
 }
 
 /** Greedy colouring of a weighted conflict graph, as `assignColours` describes. */

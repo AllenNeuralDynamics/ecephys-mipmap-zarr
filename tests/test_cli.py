@@ -293,6 +293,7 @@ class TestCLIParsing:
                 "store_path": "mipmap.zarr",
                 "events": None,
                 "markers": None,
+                "filter": None,
                 "channels": [1, 2, 3],
                 "channel_order": None,
                 "remote": False,

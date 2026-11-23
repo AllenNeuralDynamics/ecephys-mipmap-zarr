@@ -150,7 +150,7 @@ export function depthOrder(info: StoreInfo, channels: readonly number[]): number
  * (`--mv-units-muted`, or derived); `groupColours` overrides any group's. `selectedGroups` draw in full colour at
  * any zoom and the rest muted, or not at all with `unselected="hidden"`. A click on a group's tint or label fires
  * a cancelable `groupclick`, then toggles the group and fires `selectionchange`; Escape and the toolbar clear the
- * selection. `selectionchange` and `viewchange` report the viewer's own UI only: changes made through properties
+ * selection. `visibleGroups` limits which groups draw at all. `selectionchange` and `viewchange` report the viewer's own UI only: changes made through properties
  * fire nothing. `groupschange` fires whenever the groups' colours change, from any cause.
  *
  * With an event layer open, a raster under the traces (`raster="none"` hides it, `--mv-raster-height` sizes it)
@@ -189,6 +189,8 @@ export class MipmapViewer extends HTMLElement {
   #markersOpening: Promise<void> = Promise.resolve();
   #detachPanels: (() => void) | undefined;
   #selectedGroups = new Set<string>();
+  /** Groups drawn at all, by id; null draws every group. */
+  #visibleGroups: Set<string> | null = null;
   /** Colours a page set for groups, by id. */
   #groupColours = new Map<string, string>();
   /** Colours from the host's custom properties; `groups` holds `--mv-units`. */
@@ -197,7 +199,7 @@ export class MipmapViewer extends HTMLElement {
   #rampColours: string[] = [];
   #groupStyles: GroupStyle[] = [];
   /** Colour indices for the open layer, kept until the layer or the number of colours changes. */
-  #colourIndex: { tinter: EventTinter; n: number; index: Int32Array } | undefined;
+  #colourIndex: { tinter: EventTinter; n: number; visible: Set<string> | null; index: Int32Array } | undefined;
   readonly #controls: Controls;
   #worker: Worker | undefined;
   #renderer: Renderer | undefined;
@@ -350,6 +352,21 @@ export class MipmapViewer extends HTMLElement {
   }
   set selectedGroups(ids: Iterable<string>) {
     this.#selectedGroups = new Set(ids);
+    this.#applySelection();
+  }
+
+  /**
+   * Ids of the groups drawn at all, or null (the default) for every group. Unlike a selection, which mutes the
+   * rest, a group outside this set is not drawn: no tint, raster mark, label or click, and colours are kept apart
+   * among the visible groups only. Ids the layer lacks are ignored. Hosts derive it from `eventLayer.groups`'
+   * properties, for instance with `groupsWhere`.
+   */
+  get visibleGroups(): string[] | null {
+    return this.#visibleGroups === null ? null : [...this.#visibleGroups];
+  }
+  set visibleGroups(ids: Iterable<string> | null) {
+    this.#visibleGroups = ids === null ? null : new Set(ids);
+    this.#recolour();
     this.#applySelection();
   }
 
@@ -630,14 +647,21 @@ export class MipmapViewer extends HTMLElement {
     const rows = [...units, ...units.map((c, i) => mutedCss[i] ?? mutedColour(c, base.noise))];
     const tinter = this.#tinter;
     if (tinter !== undefined) {
-      if (this.#colourIndex?.tinter !== tinter || this.#colourIndex.n !== n)
-        this.#colourIndex = { tinter, n, index: tinter.assignColours(n) };
-      const { index } = this.#colourIndex;
       const ids = tinter.groupIds;
+      const visible = this.#visibleGroups;
+      let cached = this.#colourIndex;
+      if (cached?.tinter !== tinter || cached.n !== n || cached.visible !== visible) {
+        const shown = visible === null ? undefined : new Set(ids.flatMap((id, g) => (visible.has(id) ? [g] : [])));
+        cached = { tinter, n, visible, index: tinter.assignColours(n, shown) };
+        this.#colourIndex = cached;
+      }
+      const { index } = cached;
       const row = new Int32Array(ids.length).fill(-1);
       const mutedRow = new Int32Array(ids.length).fill(-1);
       const overrideRow = new Map<string, number>();
       ids.forEach((id, g) => {
+        // A group without rows tints nothing, labels nothing and takes no clicks.
+        if (visible !== null && !visible.has(id)) return;
         const own = this.#groupColours.get(id);
         if (own !== undefined) {
           let r = overrideRow.get(own);
@@ -870,12 +894,13 @@ export class MipmapViewer extends HTMLElement {
     const channelSlot = Int32Array.from(layer.info.channelIds, (id) => slotOf.get(byId.get(id) ?? -1) ?? -1);
     const anySelected = this.#selectedGroups.size > 0;
     const hidden = this.unselected === "hidden";
+    const visible = this.#visibleGroups;
     const ids = layer.info.groups.ids;
     const colour = new Int32Array(ids.length).fill(-1);
     const top = new Uint8Array(ids.length);
     ids.forEach((id, g) => {
       const style = this.#groupStyles[g];
-      if (style === undefined) return;
+      if (style === undefined || (visible !== null && !visible.has(id))) return;
       const selected = this.#selectedGroups.has(id);
       if (anySelected && !selected && hidden) return;
       colour[g] = packColour(anySelected && !selected ? style.muted : style.colour);

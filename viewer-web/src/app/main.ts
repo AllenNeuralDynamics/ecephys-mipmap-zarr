@@ -4,6 +4,7 @@ import {
   type SelectionChangeDetail,
   type ViewChangeDetail,
 } from "../element/mipmap-viewer.js";
+import { groupsWhere, parseGroupFilter } from "../events/filter.js";
 
 defineMipmapViewer();
 
@@ -43,6 +44,18 @@ if (markers !== null) viewer.markers = markers;
 const selected = params.get("groups");
 if (selected !== null) viewer.selectedGroups = selected.split(",").filter(Boolean);
 if (params.get("unselected") === "hidden") viewer.unselected = "hidden";
+const filter = params.get("filter");
+if (filter !== null) {
+  // Applied once per layer, when its groups arrive; setting it fires groupschange again for the same layer.
+  const wanted = parseGroupFilter(filter);
+  let filtered: unknown;
+  viewer.addEventListener("groupschange", () => {
+    const layer = viewer.eventLayer;
+    if (layer === undefined || layer === filtered) return;
+    filtered = layer;
+    viewer.visibleGroups = groupsWhere(layer.groups, wanted);
+  });
+}
 const store = params.get("store");
 if (store !== null) {
   input.value = store;

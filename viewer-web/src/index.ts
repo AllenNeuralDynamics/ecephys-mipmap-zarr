@@ -34,5 +34,6 @@ export {
   type EventLayerInfo,
   type EventWindow,
 } from "./events/layer.js";
+export { groupsWhere, parseGroupFilter, type GroupFilter } from "./events/filter.js";
 export { Renderer, type RendererOptions, type TileProvider } from "./render/renderer.js";
 export { clampView, panBy, visibleSamples, zoomAbout, type View } from "./render/view.js";

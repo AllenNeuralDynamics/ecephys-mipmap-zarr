@@ -100,9 +100,9 @@ export class EventTinter {
     return this.#layer.info.groups.ids;
   }
 
-  /** Per group, a 0-based colour below `nColours`, apart from groups whose footprints overlap. */
-  assignColours(nColours: number): Int32Array {
-    return assignColours(this.#layer.info.groups, nColours, this.#positions);
+  /** Per group, a 0-based colour below `nColours`, apart from groups whose footprints overlap; -1 outside `shown`. */
+  assignColours(nColours: number, shown?: ReadonlySet<number>): Int32Array {
+    return assignColours(this.#layer.info.groups, nColours, this.#positions, shown);
   }
 
   /** Per group, the ramp rows it tints with normally and while other groups are selected; -1 for none. */
