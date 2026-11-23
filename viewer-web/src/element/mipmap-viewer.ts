@@ -5,7 +5,7 @@ import { sampleMapping } from "../events/tint.js";
 import { EventTinter } from "../events/tinter.js";
 import { ReaderClient } from "../reader/client.js";
 import type { StoreInfo } from "../reader/store.js";
-import { DEFAULT_PALETTE, Renderer, type TintRequest } from "../render/renderer.js";
+import { CONTEXT_OPTIONS, DEFAULT_PALETTE, Renderer, type TintRequest } from "../render/renderer.js";
 import { mutedColour, type TracePalette } from "../render/ramp.js";
 import { viewOfRange, visibleSamples, type View } from "../render/view.js";
 import ReaderWorker from "../reader/worker.ts?worker&inline";
@@ -532,7 +532,10 @@ export class MipmapViewer extends HTMLElement {
     const client = new ReaderClient(worker);
     this.#status.textContent = "Opening…";
     try {
-      const info = await client.open(new URL(url, document.baseURI).href);
+      const opening = client.open(new URL(url, document.baseURI).href);
+      // The first WebGL context starts the GPU process, about 200 ms of main thread: overlap it with the open.
+      this.#canvas.getContext("webgl2", CONTEXT_OPTIONS);
+      const info = await opening;
       if (this.#worker !== worker) return;
       this.#info = info;
       this.#renderer = new Renderer(this.#canvas, info, client, {

@@ -100,7 +100,9 @@ function clippedStats(values: Float32Array): { mean: number; sd: number } {
     let n = 0;
     let sum = 0;
     let squares = 0;
-    for (const v of values) {
+    // Indexed: a typed array's iterator is several times slower here, and this runs over a whole raw chunk.
+    for (let i = 0; i < values.length; i++) {
+      const v = values[i] ?? NaN;
       if (v < lo || v > hi) continue;
       n++;
       sum += v;
@@ -114,6 +116,12 @@ function clippedStats(values: Float32Array): { mean: number; sd: number } {
   }
   return { mean, sd };
 }
+
+/**
+ * The trace canvas's WebGL2 attributes. A context's attributes are fixed by the first `getContext` call, so a host
+ * creating it early, to start the GPU while metadata loads, must pass these.
+ */
+export const CONTEXT_OPTIONS: WebGLContextAttributes = { antialias: false, premultipliedAlpha: true };
 
 /**
  * Draws a store's view on a WebGL2 canvas, fetching the tiles each frame needs and drawing coarser resident
@@ -162,7 +170,7 @@ export class Renderer {
     readonly tiles: TileProvider,
     readonly options: RendererOptions = {},
   ) {
-    const gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: true });
+    const gl = canvas.getContext("webgl2", CONTEXT_OPTIONS);
     if (gl === null) throw new Error("WebGL2 is unavailable");
     if (gl.getExtension("EXT_color_buffer_float") === null)
       throw new Error("WebGL2 float render targets are unavailable");
@@ -559,7 +567,6 @@ export class Renderer {
     gl.clearColor(0, 0, 0, 0);
     gl.disable(gl.SCISSOR_TEST);
     gl.clear(gl.COLOR_BUFFER_BIT);
-    if (!this.#statsReady) return;
 
     const [s0, s1] = visibleSamples(view, width);
     const plan = planWindow(this.info, s0, s1, width, this.options.oversample ?? DEFAULT_OVERSAMPLE);
@@ -568,6 +575,11 @@ export class Renderer {
     if (visible.length === 0) return;
     const array = this.#array(plan.key);
     const needed = this.#tilesCovering(array, visible, plan.start, plan.end);
+    if (!this.#statsReady) {
+      // Drawing needs the amplitude scale and centres, but fetching the view's tiles does not: start them now.
+      for (const need of needed) this.#request(need);
+      return;
+    }
     const wanted = new Set(needed.map((n) => n.id));
     for (const [id, controller] of this.#inFlight) {
       if (!wanted.has(id) && !id.startsWith(`${this.#coarsest}|`)) {

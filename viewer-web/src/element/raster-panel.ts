@@ -54,13 +54,16 @@ export class RasterPanel {
   }
 
   setLayer(layer: EventLayer | undefined, mapping: { scale: number; offset: number }, samplingFrequency: number): void {
+    // A page's first canvas call starts the GPU process (about 200 ms); a canvas never drawn on needs no clearing.
+    const drawnOn = this.#drawn !== undefined;
     this.#layer = layer;
     this.#mapping = mapping;
     this.#samplingFrequency = samplingFrequency;
     this.#loaded = undefined;
     this.#pending = undefined;
     this.#drawn = undefined;
-    if (layer === undefined) this.canvas.getContext("2d")?.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (layer === undefined && drawnOn)
+      this.canvas.getContext("2d")?.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   setStyle(style: RasterStyle): void {
