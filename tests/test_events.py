@@ -54,6 +54,19 @@ def test_index_names_each_chunks_first_sample(tmp_path: Path) -> None:
     assert root["sample_index"].chunks == (4,)  # type: ignore[union-attr]
 
 
+def test_per_event_arrays_shard_whole_chunks(tmp_path: Path) -> None:
+    import zarr
+
+    path = _write(
+        tmp_path, sample_index=np.arange(10) * 7, group=np.zeros(10, int), amplitude=np.ones(10), chunk=2, shard=3
+    )
+    root = zarr.open_group(str(path), mode="r")
+    for name in ("sample_index", "group", "amplitude"):
+        assert root[name].chunks == (2,)  # type: ignore[union-attr]
+        assert root[name].shards == (4,)  # type: ignore[union-attr]
+    np.testing.assert_array_equal(read_events(path)["sample_index"], np.arange(10) * 7)
+
+
 def test_refuses_fractional_samples_and_bad_groups(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="whole samples"):
         _write(tmp_path, sample_index=np.array([1.5, 2, 3, 4]))

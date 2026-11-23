@@ -11,6 +11,8 @@ Layout (Zarr v3)::
     /depth_range    (N, 2)    float32, optional; µm, the probe span the event covers
     /width_s        (N,)      float32, optional; overrides window_s for that event
     /index/first_sample       float64, sample_index of each chunk's first event, to find a window's chunks
+
+Per-event arrays are sharded: a chunk of a few seconds is what a viewer fetches, by range from its shard.
     /counts/b<bin>  (G, B)    uint32, events per group in each run of <bin> samples from sample 0; root attr
                               count_bins lists the bins, finest first, each 8x the last
     /groups/id      (G,)      str
@@ -52,7 +54,10 @@ __all__ = [
 
 EVENTS_FORMAT = "ecephys-events"
 EVENTS_FORMAT_VERSION = 1
-DEFAULT_CHUNK = 262_144
+#: Events per chunk, the least a viewer fetches: a few seconds of a dense sorting.
+DEFAULT_CHUNK = 16_384
+#: Events per shard, the stored object; a viewer reads its chunks by range.
+DEFAULT_SHARD = 262_144
 #: A channel is in a unit's footprint at this fraction of the unit's largest template peak-to-peak.
 FOOTPRINT_FRACTION = 0.3
 #: Footprint channels kept per unit, largest first.
@@ -116,6 +121,7 @@ def write_events(
     depth_range: npt.ArrayLike | None = None,
     width_s: npt.ArrayLike | None = None,
     chunk: int = DEFAULT_CHUNK,
+    shard: int = DEFAULT_SHARD,
     overwrite: bool = False,
 ) -> zarr.Group:
     """Write an event layer, sorting events by time.
@@ -144,6 +150,8 @@ def write_events(
         Per-event values; see the module docstring.
     chunk : int, optional
         Events per chunk.
+    shard : int, optional
+        Events per shard, rounded up to whole chunks.
     overwrite : bool, optional
         Replace an existing store.
 
@@ -196,11 +204,18 @@ def write_events(
         }
     )
     size = max(1, min(chunk, n))
+    # Whole chunks per shard, and no more than the events hold.
+    per_shard = max(1, min(-(-shard // size), -(-n // size)))
     sorted_samples = samples[order].astype(np.float64)
-    root.create_array("sample_index", data=sorted_samples, chunks=(size,))
-    root.create_array("group", data=rows[order].astype(np.int32), chunks=(size,))
+
+    def per_event_array(name: str, data: npt.NDArray[Any]) -> None:
+        tail = data.shape[1:]
+        root.create_array(name, data=data, chunks=(size, *tail), shards=(size * per_shard, *tail))
+
+    per_event_array("sample_index", sorted_samples)
+    per_event_array("group", rows[order].astype(np.int32))
     for name, (arr, dtype) in per_event.items():
-        root.create_array(name, data=arr[order].astype(dtype), chunks=(size, *arr.shape[1:]))
+        per_event_array(name, arr[order].astype(dtype))
     index = root.create_group("index")
     index.create_array("first_sample", data=sorted_samples[::size].copy())
     root.attrs["count_bins"] = _write_counts(root, sorted_samples, rows[order], len(groups.ids), sampling_frequency)

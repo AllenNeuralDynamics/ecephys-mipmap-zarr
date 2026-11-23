@@ -6,8 +6,8 @@ import { defaultResolveUrl, readProperty, toStrings, type Property, type ZArray 
 
 export const EVENTS_FORMAT = "ecephys-events";
 export const EVENTS_FORMAT_VERSION = 1;
-/** Decoded chunks kept per layer: a window's worth while panning back and forth. */
-const CACHED_CHUNKS = 24;
+/** Decoded events kept per layer, as whole chunks: a few raster windows' worth while panning back and forth. */
+const CACHED_EVENTS = 1_000_000;
 
 export interface EventGroups {
   ids: string[];
@@ -222,7 +222,7 @@ export class EventLayer {
     pending = this.#fetch(chunk);
     pending.catch(() => this.#cache.delete(chunk));
     this.#cache.set(chunk, pending);
-    while (this.#cache.size > CACHED_CHUNKS) {
+    while (this.#cache.size > Math.max(1, Math.ceil(CACHED_EVENTS / this.#chunk))) {
       const oldest = this.#cache.keys().next().value;
       if (oldest === undefined) break;
       this.#cache.delete(oldest);

@@ -156,6 +156,7 @@ def write_events_fixture(path: Path) -> None:
         kind="spikes",
         amplitude=np.array([700.0] * N_CHANNELS + [300.0] * len(extra)),
         chunk=5,
+        shard=10,
     )
 
 
