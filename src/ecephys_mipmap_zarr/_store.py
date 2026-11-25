@@ -290,8 +290,10 @@ def _read_gain_offset(src: zarr.Group) -> tuple[np.ndarray, np.ndarray] | None:
     """
     try:
         props = src["properties"]
-        gain = np.asarray(props["gain_to_uV"][:])  # type: ignore[index]
-        offset = np.asarray(props["offset_to_uV"][:])  # type: ignore[index]
+        if not isinstance(props, zarr.Group):
+            return None
+        gain = np.asarray(props["gain_to_uV"])
+        offset = np.asarray(props["offset_to_uV"])
     except (KeyError, AttributeError):
         return None
     return gain, offset

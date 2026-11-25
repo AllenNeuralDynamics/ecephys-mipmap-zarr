@@ -876,7 +876,7 @@ def main() -> None:
             CLICommand,
             prog="ecephys-mipmap",
             config=(tyro.conf.ConsolidateSubcommandArgs,),
-        )  # type: ignore[call-overload]
+        )
         command.cli_cmd()
     except SystemExit:
         raise

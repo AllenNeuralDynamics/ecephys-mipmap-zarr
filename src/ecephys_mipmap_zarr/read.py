@@ -263,7 +263,8 @@ class MipmapStore:
     def channel_locations(self) -> npt.NDArray[Any] | None:
         """Per-channel (x, y) positions, or ``None`` if not available."""
         try:
-            return np.asarray(self._root["properties"]["location"][:])  # type: ignore[index]
+            props = self._root["properties"]
+            return np.asarray(props["location"]) if isinstance(props, zarr.Group) else None
         except KeyError:
             return None
 

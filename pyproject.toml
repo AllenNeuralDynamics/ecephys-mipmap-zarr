@@ -96,6 +96,7 @@ mccabe = { max-complexity = 20 }
 pydocstyle = { convention = "numpy" }
 
 [tool.codespell]
+ignore-words-list = "sortings"
 skip = ".git,*.pdf,*.svg,./docs/build,uv.lock,./src/ecephys_mipmap_zarr/static,./viewer-web/dist,./viewer-web/node_modules"
 
 [tool.pytest.ini_options]

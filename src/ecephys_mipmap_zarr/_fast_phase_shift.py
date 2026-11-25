@@ -96,7 +96,7 @@ def _build_kernels_kc(shift_samples: npt.NDArray[Any], n_taps: int) -> npt.NDArr
 
 if _HAS_NUMBA:
 
-    @numba.njit(parallel=True, cache=True, boundscheck=False)  # type: ignore[untyped-decorator]
+    @numba.njit(parallel=True, cache=True, boundscheck=False)
     def _sinc_fir_kernel_tc(
         signal_tc: npt.NDArray[np.float32],
         kernels_kc: npt.NDArray[np.float32],
@@ -129,7 +129,7 @@ if _HAS_NUMBA:
                             out[n, c] += kernels_kc[k, c] * signal_tc[idx, c]
         return out
 
-    @numba.njit(parallel=True, cache=True, boundscheck=False)  # type: ignore[untyped-decorator]
+    @numba.njit(parallel=True, cache=True, boundscheck=False)
     def _sinc_fir_kernel_int16_tc(
         signal_tc: npt.NDArray[np.int16],
         kernels_kc: npt.NDArray[np.float32],

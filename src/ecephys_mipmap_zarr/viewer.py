@@ -1336,8 +1336,8 @@ class TraceViewer:
         )
 
         def _on_channel_change(event: Any) -> None:
-            start = channel_start.value
-            n = n_visible.value
+            start = int(channel_start.value or 0)
+            n = int(n_visible.value or 1)
             end = min(start + n, self.store.n_channels)
             self.set_channels(list(range(start, end)))
 

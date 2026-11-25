@@ -11,14 +11,13 @@ import errno
 import logging
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import numpy.typing as npt
 import zarr
 from zarr.abc.codec import BytesBytesCodec
 from zarr.codecs import BloscCodec, GzipCodec, ZstdCodec
-from zarr.codecs.blosc import BloscCname, BloscShuffle
 
 from ecephys_mipmap_zarr.metadata import (
     BAND_LIMITED_FRACTION,
@@ -322,13 +321,14 @@ def _resolve_compressor(
         return compressor
     if compressor == "blosc":
         # Select shuffle based on entropy and array type
+        shuffle: Literal["noshuffle", "shuffle", "bitshuffle"]
         if is_pyramid and stored_dtype == "int16":
-            shuffle = BloscShuffle.shuffle  # byte-shuffle for int16 (C,2,B) pyramids
+            shuffle = "shuffle"  # byte-shuffle for int16 (C,2,B) pyramids
         elif entropy is not None and entropy < 6.0:
-            shuffle = BloscShuffle.noshuffle  # low entropy: byte-level LZ is more efficient
+            shuffle = "noshuffle"  # low entropy: byte-level LZ is more efficient
         else:
-            shuffle = BloscShuffle.bitshuffle  # default: bitshuffle
-        return BloscCodec(cname=BloscCname.zstd, clevel=1, shuffle=shuffle)
+            shuffle = "bitshuffle"  # default: bitshuffle
+        return BloscCodec(cname="zstd", clevel=1, shuffle=shuffle)
     if compressor == "gzip":
         return GzipCodec(level=5)
     if compressor == "zstd":
