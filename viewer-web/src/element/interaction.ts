@@ -15,7 +15,8 @@ export interface InteractionTarget {
 
 /** Wheel zoom per 100 px of wheel delta. */
 const ZOOM_PER_WHEEL = 1.25;
-const GAIN_STEP = 1.25;
+/** Gain factor per gain key press or toolbar step. */
+export const GAIN_STEP = 1.25;
 const DRAG_THRESHOLD_PX = 4;
 /** Quiet time after a wheel or key before a gesture counts as finished. */
 export const SETTLE_MS = 200;

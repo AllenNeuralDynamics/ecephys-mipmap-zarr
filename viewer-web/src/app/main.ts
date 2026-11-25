@@ -37,6 +37,8 @@ if (theme === "light" || theme === "dark") {
 }
 const gain = Number(params.get("gain"));
 if (gain > 0) viewer.gain = gain;
+const rows = Number(params.get("rows"));
+if (rows >= 1) viewer.rows = rows;
 const events = params.get("events");
 if (events !== null) viewer.events = events;
 const markers = params.get("markers");
@@ -71,10 +73,11 @@ form.addEventListener("submit", (event) => {
 });
 
 viewer.addEventListener("viewchange", (event) => {
-  const { timeRange, gain, order } = (event as CustomEvent<ViewChangeDetail>).detail;
+  const { timeRange, gain, rows, order } = (event as CustomEvent<ViewChangeDetail>).detail;
   const url = new URL(location.href);
   url.searchParams.set("time", timeRange.map((t) => t.toFixed(6)).join(","));
   url.searchParams.set("gain", gain.toPrecision(4));
+  url.searchParams.set("rows", String(rows));
   url.searchParams.set("order", order);
   history.replaceState(null, "", url);
 });

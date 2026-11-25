@@ -61,6 +61,15 @@ test("a store with channel locations opens in depth order", async ({ page }) => 
   await expect(page.locator("mipmap-viewer select.order")).toHaveValue("depth");
 });
 
+test("each row is labelled with its own channel id, in either order", async ({ page }) => {
+  await open(page);
+  const ids = await page.evaluate(() => document.querySelector("mipmap-viewer")?.info?.channelIds ?? []);
+  const labels = page.locator("mipmap-viewer .ids span");
+  await expect(labels).toHaveText(DEPTH_ORDER.map((c) => ids[c] ?? ""));
+  await page.locator("mipmap-viewer select.order").selectOption("index");
+  await expect(labels).toHaveText(STORE_ORDER.map((c) => ids[c] ?? ""));
+});
+
 test("the order control switches to store order and reports it", async ({ page }) => {
   await open(page);
   await page.locator("mipmap-viewer select.order").selectOption("index");
@@ -82,7 +91,7 @@ test("dragging the scroll thumb scrolls channels and the label follows", async (
   const { firstSlot } = await state(page);
   expect(firstSlot).toBeCloseTo(2, 1);
   expect((await lastChange(page)).visibleChannels).toEqual(DEPTH_ORDER.slice(2, 6));
-  await expect(page.locator("mipmap-viewer .range")).toContainText("3–6 of 8");
+  await expect(page.locator("mipmap-viewer .range")).toContainText("rows 3–6 of 8");
 });
 
 test("a press on the track below the thumb pages down", async ({ page }) => {
@@ -102,4 +111,30 @@ test('controls="none" hides the controls and the traces take the full width', as
   await expect(page.locator("mipmap-viewer .track")).toBeHidden();
   expect((await state(page)).width).toBe(800);
   expect(withControls).toBeLessThan(800);
+});
+
+test("the gain buttons step the gain, the readout resets it, and each change is reported", async ({ page }) => {
+  await open(page);
+  const gain = (): Promise<number> => page.evaluate(() => document.querySelector("mipmap-viewer")?.gain ?? 0);
+  await page.locator("mipmap-viewer button.gain-up").click();
+  await page.locator("mipmap-viewer button.gain-up").click();
+  expect(await gain()).toBeCloseTo(1.5625);
+  await expect(page.locator("mipmap-viewer .gain output")).toHaveText("×1.56");
+  expect((await lastChange(page)).gain).toBeCloseTo(1.5625);
+  await page.locator("mipmap-viewer button.gain-down").click();
+  expect(await gain()).toBeCloseTo(1.25);
+  await page.locator("mipmap-viewer .gain output").click();
+  expect(await gain()).toBe(1);
+  expect((await lastChange(page)).gain).toBe(1);
+});
+
+test("the rows menu sets how many rows are in view", async ({ page }) => {
+  await open(page, 3);
+  const rows = page.locator("mipmap-viewer select.rows");
+  await expect(rows).toHaveValue("3");
+  await expect(rows.locator("option")).toHaveText(["3", "All 8"]);
+  await rows.selectOption("8");
+  expect((await state(page)).firstSlot).toBe(0);
+  expect(await page.evaluate(() => document.querySelector("mipmap-viewer")?.rows)).toBe(8);
+  expect((await lastChange(page)).rows).toBe(8);
 });

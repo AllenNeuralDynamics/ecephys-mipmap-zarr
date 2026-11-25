@@ -22,6 +22,8 @@ export interface ViewChangeDetail {
   /** Seconds from `t_start`. */
   timeRange: [number, number];
   gain: number;
+  /** Channel rows in view. */
+  rows: number;
   order: ChannelOrder;
   /** Channel indices in view, top to bottom. */
   visibleChannels: number[];
@@ -114,7 +116,7 @@ canvas.axis { top: calc(100% - var(--axis-h)); height: var(--axis-h); color: var
 .note { position: absolute; left: 8px; bottom: calc(var(--axis-h) + 4px); font: 11px system-ui, sans-serif;
   opacity: 0.7; pointer-events: none; }
 .frame:not(.with-raster) .note { display: none; }
-.track { bottom: calc(var(--raster-h) + var(--axis-h)); }
+.track, .ids { bottom: calc(var(--raster-h) + var(--axis-h)); }
 .labels { position: absolute; inset: 0 14px calc(var(--raster-h) + var(--axis-h)) 0; overflow: hidden;
   pointer-events: none; font: 10px system-ui, sans-serif; }
 .labels span { position: absolute; white-space: nowrap; line-height: 1; pointer-events: auto; cursor: pointer; }
@@ -143,7 +145,7 @@ export function depthOrder(info: StoreInfo, channels: readonly number[]): number
  * `<mipmap-viewer>`: draws a mipmap store. Set `store` to its URL; `timeRange`, `channels`, `order`, `rows`
  * and `gain` may be set before or after it opens. `order` defaults to depth when the store has channel locations.
  * Fires `viewchange` when a gesture or control change ends and `channelclick` on a click that is not a drag.
- * `controls="none"` hides the channel scroll bar and the toolbar. `theme` is `auto` (the default), `light` or
+ * `controls="none"` hides the channel scroll bar, the channel ids beside it and the toolbar. `theme` is `auto` (the default), `light` or
  * `dark`. `events` is the URL of an event layer whose groups colour the traces they cover.
  *
  * Groups whose footprints overlap get different colours from `--mv-units`, each with a muted variant
@@ -251,6 +253,13 @@ export class MipmapViewer extends HTMLElement {
       setOrder: (order) => {
         this.order = order;
       },
+      setGain: (gain) => {
+        this.gain = gain;
+      },
+      setRows: (rows) => {
+        this.#rows = rows;
+        this.#renderer?.setView({ nSlots: rows });
+      },
       settled: () => {
         this.#emitViewChange();
       },
@@ -268,6 +277,7 @@ export class MipmapViewer extends HTMLElement {
       this.#labels,
       this.#note,
       this.#status,
+      this.#controls.ids,
       this.#controls.toolbar,
       this.#controls.track,
     );
@@ -1000,9 +1010,9 @@ export class MipmapViewer extends HTMLElement {
       nSlots: view.nSlots,
       nDisplayed: displayed.length,
       order: this.order,
+      gain: view.gain,
       canDepth: hasDepth(info),
-      topId: id(Math.floor(view.firstSlot)),
-      bottomId: id(Math.ceil(view.firstSlot + view.nSlots) - 1),
+      idAt: id,
     });
   }
 
@@ -1018,6 +1028,7 @@ export class MipmapViewer extends HTMLElement {
     const detail: ViewChangeDetail = {
       timeRange,
       gain: view.gain,
+      rows: view.nSlots,
       order: this.order,
       visibleChannels: this.#visibleChannels(view),
     };
