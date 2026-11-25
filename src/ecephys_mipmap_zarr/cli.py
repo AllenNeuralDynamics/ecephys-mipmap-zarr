@@ -6,9 +6,9 @@ Requires the ``cli`` extra::
 
 Usage::
 
-    ecephys-mipmap build --input raw.dat --output out.zarr --sampling-rate 30000 \
+    ecephys-mipmap build --input raw.dat --output out.zarr --sampling-frequency 30000 \
         --n-samples 1000000 --n-channels 384 --dtype float32
-    ecephys-mipmap add-pyramid --raw-store raw.zarr --output pyr.zarr --sampling-rate 30000
+    ecephys-mipmap add-pyramid --raw-store raw.zarr --output pyr.zarr
     ecephys-mipmap info store.zarr
     ecephys-mipmap add-stats store.zarr
     ecephys-mipmap events-from-sorting curated/ analyzer.zarr spikes.events.zarr
@@ -247,7 +247,7 @@ def _open_cbin(path: str, sampling_frequency: float | None) -> tuple[Any, str, f
             exec(params_path.read_text(), {}, params)
             sampling_frequency = float(params.get("sample_rate", 0))
         if sampling_frequency is None or sampling_frequency <= 0:
-            console.print("[red]Error:[/red] --sampling-rate required (could not read from params.py)")
+            console.print("[red]Error:[/red] --sampling-frequency required (could not read from params.py)")
             raise SystemExit(1)
 
     return reader, dtype, sampling_frequency
@@ -277,7 +277,7 @@ class BuildSettings:
     duration_seconds: float | None = None
     """Length of the source window to include, in seconds; default = rest of recording."""
     sampling_frequency: float | None = None
-    """Sampling rate in Hz (auto-detected for .cbin)."""
+    """Sampling rate in Hz (default: read from a zarr's root attrs or a .cbin's params.py)."""
     units: str | None = None
     """Units the values decode to (default: uV with an ADC gain, counts for integer sources without one)."""
     n_samples: int | None = None
@@ -368,16 +368,18 @@ class BuildSettings:
         elif _is_zarr_store(self.input):
             from ecephys_mipmap_zarr._store import _open_store
 
-            if self.sampling_frequency is None:
-                console.print("[red]Error:[/red] --sampling-rate is required for zarr input")
-                raise SystemExit(1)
             console.print(f"Reading zarr store: {self.input}")
             root = _open_store(self.input, mode="r")
+            sampling_frequency = self.sampling_frequency or float(root.attrs.get("sampling_frequency") or 0)  # type: ignore[arg-type]
+            if sampling_frequency <= 0:
+                console.print(
+                    "[red]Error:[/red] --sampling-frequency is required: the store has no sampling_frequency attr"
+                )
+                raise SystemExit(1)
             raw_array = root[self.raw_path]
             source = raw_array
             dtype = str(raw_array.dtype)  # type: ignore[union-attr]
             full_samples, n_channels = raw_array.shape  # type: ignore[union-attr]
-            sampling_frequency = self.sampling_frequency
             console.print(f"  shape: ({full_samples}, {n_channels}), dtype: {dtype}")
             source, n_samples = _maybe_window_source(
                 source,
@@ -407,7 +409,7 @@ class BuildSettings:
                 console.print("[red]Error:[/red] --n-samples and --n-channels are required for .dat input")
                 raise SystemExit(1)
             if self.sampling_frequency is None:
-                console.print("[red]Error:[/red] --sampling-rate is required for .dat input")
+                console.print("[red]Error:[/red] --sampling-frequency is required for .dat input")
                 raise SystemExit(1)
             dtype = self.dtype
             sampling_frequency = self.sampling_frequency

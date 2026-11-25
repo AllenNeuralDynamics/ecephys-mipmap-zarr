@@ -126,6 +126,29 @@ class TestBuildFromZarr:
         out_root = zarr.open_group(str(out), mode="r", use_consolidated=None)
         assert out_root["raw"].shape == (4, 100_000)
 
+    def test_sampling_frequency_from_attrs(self, tmp_path):
+        raw_path = tmp_path / "raw.zarr"
+        root = zarr.open_group(str(raw_path), mode="w", zarr_format=3)
+        root.attrs["sampling_frequency"] = 32000.0
+        root.create_array("traces_seg0", shape=(100_000, 4), dtype="int16", chunks=(4096, 4))[:] = (
+            np.random.default_rng(0).integers(-1000, 1000, size=(100_000, 4), dtype=np.int16)
+        )
+
+        out = tmp_path / "mipmap.zarr"
+        BuildSettings(input=str(raw_path), output=str(out), raw_path="traces_seg0").cli_cmd()
+
+        assert zarr.open_group(str(out), mode="r").attrs["sampling_frequency"] == 32000.0
+
+    def test_no_sampling_frequency_raises(self, tmp_path):
+        import pytest
+
+        raw_path = tmp_path / "raw.zarr"
+        root = zarr.open_group(str(raw_path), mode="w", zarr_format=3)
+        root.create_array("raw", shape=(20_000, 4), dtype="int16", chunks=(4096, 4))[:] = 0
+
+        with pytest.raises(SystemExit):
+            BuildSettings(input=str(raw_path), output=str(tmp_path / "mipmap.zarr")).cli_cmd()
+
 
 class TestAddPyramidCLI:
     def test_basic(self, tmp_path):
