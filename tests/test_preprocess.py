@@ -426,8 +426,8 @@ class TestChainNoise:
         assert chain_noise_floor(chain) == pytest.approx(self.SIGMA * self._measured_gain(root, chain), rel=0.05)
 
     def test_refuses_a_low_passed_root(self):
-        import spikeinterface.core as sc
-        import spikeinterface.preprocessing as spre
+        sc = pytest.importorskip("spikeinterface.core")
+        spre = pytest.importorskip("spikeinterface.preprocessing")
 
         from ecephys_mipmap_zarr.preprocess import chain_noise_floor
 
