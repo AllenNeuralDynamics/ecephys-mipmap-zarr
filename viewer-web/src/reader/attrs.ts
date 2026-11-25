@@ -55,7 +55,8 @@ function optionalString(attrs: Record<string, unknown>, key: string): string | n
 
 function channelList(stats: Record<string, unknown>, key: string, n: number, nullable: boolean): Float32Array {
   const values = stats[key];
-  if (!Array.isArray(values) || values.length !== n) throw new FormatError(`channel_stats.${key} is not one per channel`);
+  if (!Array.isArray(values) || values.length !== n)
+    throw new FormatError(`channel_stats.${key} is not one per channel`);
   return Float32Array.from(values, (v: unknown) => {
     if (v === null && nullable) return NaN;
     if (typeof v !== "number" || !Number.isFinite(v)) throw new FormatError(`channel_stats.${key} holds a non-number`);
