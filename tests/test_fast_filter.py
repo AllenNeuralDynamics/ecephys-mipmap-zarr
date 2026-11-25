@@ -8,7 +8,6 @@ import scipy.signal
 
 from ecephys_mipmap_zarr import _fast_filter
 
-
 FS = 30_000.0
 
 

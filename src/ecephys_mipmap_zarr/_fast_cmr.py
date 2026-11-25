@@ -83,7 +83,8 @@ def _parallel_reduce_axis1(
     min_block = 8192
     effective_workers = max(1, min(n_workers, T // min_block))
     if effective_workers == 1:
-        return operator_func(traces, axis=1)
+        reduced: npt.NDArray[Any] = operator_func(traces, axis=1)
+        return reduced
 
     block = (T + effective_workers - 1) // effective_workers
     bounds = [(t0, min(t0 + block, T)) for t0 in range(0, T, block)]
@@ -108,7 +109,7 @@ _original_get_traces: Any = None
 
 
 def _fast_cmr_get_traces(self: Any, start_frame: int, end_frame: int, channel_indices: Any) -> npt.NDArray[Any]:
-    """Replacement ``CommonReferenceRecordingSegment.get_traces`` with parallel reduction.
+    """Re-reference like ``CommonReferenceRecordingSegment.get_traces``, with a parallel reduction.
 
     Only patches the common global-reference, no-groups, all-channels path.
     Every other configuration (``local``, ``single``, grouped, explicit
@@ -117,13 +118,14 @@ def _fast_cmr_get_traces(self: Any, start_frame: int, end_frame: int, channel_in
     # Fall back to stock for any path we don't handle.
     is_common_fast_path = self.group_indices is None and self.reference == "global" and self.ref_channel_indices is None
     if not is_common_fast_path:
-        return _original_get_traces(self, start_frame, end_frame, channel_indices)
+        stock: npt.NDArray[Any] = _original_get_traces(self, start_frame, end_frame, channel_indices)
+        return stock
 
-    traces = self.parent_recording_segment.get_traces(start_frame, end_frame, slice(None))
+    traces: npt.NDArray[Any] = self.parent_recording_segment.get_traces(start_frame, end_frame, slice(None))
     shift = _parallel_reduce_axis1(traces, self.operator_func)
     # Restore the keepdims semantics of the original: shape (T, 1) for broadcast.
     shift = shift[:, np.newaxis]
-    re_referenced = traces[:, channel_indices] - shift
+    re_referenced: npt.NDArray[Any] = traces[:, channel_indices] - shift
     return re_referenced.astype(self.dtype, copy=False)
 
 

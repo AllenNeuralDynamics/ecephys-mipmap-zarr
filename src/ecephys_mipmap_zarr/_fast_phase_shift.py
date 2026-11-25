@@ -96,7 +96,7 @@ def _build_kernels_kc(shift_samples: npt.NDArray[Any], n_taps: int) -> npt.NDArr
 
 if _HAS_NUMBA:
 
-    @numba.njit(parallel=True, cache=True, boundscheck=False)
+    @numba.njit(parallel=True, cache=True, boundscheck=False)  # type: ignore[untyped-decorator]
     def _sinc_fir_kernel_tc(
         signal_tc: npt.NDArray[np.float32],
         kernels_kc: npt.NDArray[np.float32],
@@ -129,7 +129,7 @@ if _HAS_NUMBA:
                             out[n, c] += kernels_kc[k, c] * signal_tc[idx, c]
         return out
 
-    @numba.njit(parallel=True, cache=True, boundscheck=False)
+    @numba.njit(parallel=True, cache=True, boundscheck=False)  # type: ignore[untyped-decorator]
     def _sinc_fir_kernel_int16_tc(
         signal_tc: npt.NDArray[np.int16],
         kernels_kc: npt.NDArray[np.float32],
@@ -192,9 +192,10 @@ def apply_frequency_shift_fir(
     orig_dtype = signal.dtype
     if orig_dtype == np.int16:
         sig_i16 = np.ascontiguousarray(signal)
-        return _sinc_fir_kernel_int16_tc(sig_i16, kernels_kc)
+        shifted_i16: npt.NDArray[Any] = _sinc_fir_kernel_int16_tc(sig_i16, kernels_kc)
+        return shifted_i16
     sig = np.ascontiguousarray(signal, dtype=np.float32)
-    out = _sinc_fir_kernel_tc(sig, kernels_kc)
+    out: npt.NDArray[Any] = _sinc_fir_kernel_tc(sig, kernels_kc)
     if orig_dtype != np.float32:
         out = out.astype(orig_dtype)
     return out
@@ -212,7 +213,7 @@ def _patched_phase_shift_init(
     inter_sample_shift: Any = None,
     dtype: Any = None,
 ) -> None:
-    """Replacement ``PhaseShiftRecording.__init__`` with int16-native fast path.
+    """Initialise like ``PhaseShiftRecording.__init__``, adding an int16-native fast path.
 
     When the parent recording is integer-dtyped and the caller didn't pin a
     specific output dtype, this flags the segments to use
@@ -266,9 +267,10 @@ def _fast_get_traces(self: Any, start_frame: int, end_frame: int, channel_indice
     if not getattr(self, "_fast_int16_path", False):
         # Not on the fast path (float parent or caller pinned int dtype) —
         # run SI's original get_traces.
-        return _original_functions["PhaseShiftRecordingSegment.get_traces"](
+        stock: np.ndarray = _original_functions["PhaseShiftRecordingSegment.get_traces"](
             self, start_frame, end_frame, channel_indices
         )
+        return stock
 
     if channel_indices is None:
         channel_indices = slice(None)
@@ -307,7 +309,7 @@ def _fast_get_traces(self: Any, start_frame: int, end_frame: int, channel_indice
     # float32 kernel via a cast (rare — typical ephys parents are int16).
     if traces.dtype == np.int16:
         traces = np.ascontiguousarray(traces)
-        shifted = _sinc_fir_kernel_int16_tc(traces, kernels_kc)
+        shifted: npt.NDArray[Any] = _sinc_fir_kernel_int16_tc(traces, kernels_kc)
     else:
         sig_f32 = np.ascontiguousarray(traces, dtype=np.float32)
         shifted = _sinc_fir_kernel_tc(sig_f32, kernels_kc)
@@ -370,13 +372,13 @@ def install() -> None:
             "load_preprocessed_recording(..., fast_phase_shift=False) to fall "
             "back to SI's stock FFT PhaseShift."
         )
-    _original_functions["apply_frequency_shift"] = ps.apply_frequency_shift
-    _original_functions["apply_fshift"] = ps.apply_fshift
+    _original_functions["apply_frequency_shift"] = getattr(ps, "apply_frequency_shift")
+    _original_functions["apply_fshift"] = getattr(ps, "apply_fshift")
     _original_functions["PhaseShiftRecording.__init__"] = ps.PhaseShiftRecording.__init__
     _original_functions["PhaseShiftRecordingSegment.get_traces"] = ps.PhaseShiftRecordingSegment.get_traces
     apply_frequency_shift_fir._fast_patched = True  # type: ignore[attr-defined]
-    ps.apply_frequency_shift = apply_frequency_shift_fir
-    ps.apply_fshift = apply_frequency_shift_fir
+    setattr(ps, "apply_frequency_shift", apply_frequency_shift_fir)
+    setattr(ps, "apply_fshift", apply_frequency_shift_fir)
     ps.PhaseShiftRecording.__init__ = _patched_phase_shift_init
     ps.PhaseShiftRecordingSegment.get_traces = _fast_get_traces
     log.info(
@@ -399,8 +401,8 @@ def uninstall() -> None:
 
     if not _original_functions:
         return
-    ps.apply_frequency_shift = _original_functions.pop("apply_frequency_shift")
-    ps.apply_fshift = _original_functions.pop("apply_fshift")
+    setattr(ps, "apply_frequency_shift", _original_functions.pop("apply_frequency_shift"))
+    setattr(ps, "apply_fshift", _original_functions.pop("apply_fshift"))
     ps.PhaseShiftRecording.__init__ = _original_functions.pop("PhaseShiftRecording.__init__")
     ps.PhaseShiftRecordingSegment.get_traces = _original_functions.pop("PhaseShiftRecordingSegment.get_traces")
     log.info("fast-phase-shift: uninstalled")

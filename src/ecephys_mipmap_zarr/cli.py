@@ -180,7 +180,7 @@ class _WindowedSource:
         self._start = int(start_sample)
         self._n_samples = int(end_sample - start_sample)
         self._n_channels = int(n_channels)
-        self._dtype = np.dtype(source.dtype)
+        self._dtype: np.dtype[Any] = np.dtype(source.dtype)
 
     @property
     def shape(self) -> tuple[int, int]:

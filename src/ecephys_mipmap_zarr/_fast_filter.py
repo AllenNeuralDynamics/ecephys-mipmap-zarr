@@ -95,7 +95,8 @@ def _parallel_sos_apply(
     if C < 2 * n_workers or n_workers == 1:
         # Too few channels to benefit from splitting — fall through to scipy.
         fn = scipy.signal.sosfiltfilt if kind == "sosfiltfilt" else scipy.signal.sosfilt
-        return fn(coeff, traces, axis=0)
+        result: npt.NDArray[Any] = fn(coeff, traces, axis=0)
+        return result
 
     block = (C + n_workers - 1) // n_workers
     bounds = [(c0, min(c0 + block, C)) for c0 in range(0, C, block)]
@@ -120,14 +121,13 @@ def _parallel_sos_apply(
 
 
 def _fast_filter_get_traces(self: Any, start_frame: int, end_frame: int, channel_indices: Any) -> npt.NDArray[Any]:
-    """Replacement ``FilterRecordingSegment.get_traces`` with parallel SOS.
+    """Filter like ``FilterRecordingSegment.get_traces``, with channel-parallel SOS.
 
     Mirrors SI's original logic (`filter.py:175-219` in SI 0.103.0) but
     swaps the two scipy SOS calls for their channel-parallel variants.
     Falls back to SI's stock path for non-SOS filter modes (``ba``).
     """
     import scipy.signal
-
     from spikeinterface.core import get_chunk_with_margin
 
     traces_chunk, left_margin, right_margin = get_chunk_with_margin(
@@ -146,6 +146,7 @@ def _fast_filter_get_traces(self: Any, start_frame: int, end_frame: int, channel
     # Only SOS mode is parallelised here; ``ba`` is rarely used and would
     # need a separate code path for lfilter/filtfilt.  Fall back to stock
     # scipy for it.
+    filtered: npt.NDArray[Any]
     if self.filter_mode != "sos":
         if self.direction == "forward-backward":
             b, a = self.coeff
