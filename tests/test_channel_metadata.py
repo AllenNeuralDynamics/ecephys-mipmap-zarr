@@ -55,6 +55,38 @@ def test_metadata_from_copies_channel_properties_but_not_calibration(tmp_path):
     np.testing.assert_allclose(np.asarray(w.data), traces[:1000].T * GAIN[:, None], rtol=1e-6)
 
 
+def test_metadata_from_locates_channels_by_the_probe_without_a_location_property(tmp_path):
+    traces = np.random.default_rng(0).integers(-100, 100, (100_000, N_CH), dtype=np.int16)
+    src = _si_zarr(tmp_path / "si.zarr", traces)
+    root = zarr.open_group(str(src), mode="r+")
+    del root["properties/location"]
+    # Contacts listed out of channel order: channel c is the contact wired to device channel c.
+    positions = [[0.0, 30.0], [16.0, 0.0], [0.0, 15.0], [16.0, 45.0]]
+    root.attrs["probe"] = {"probes": [{"contact_positions": positions, "device_channel_indices": [2, 0, 1, 3]}]}
+    out = tmp_path / "out.zarr"
+    build_mipmap(
+        traces, out, sampling_frequency=30000.0, config=SMALL_CFG, encoding=LOSSLESS_ENCODING, metadata_from=str(src)
+    )
+
+    store = open_mipmap(out)
+    np.testing.assert_array_equal(store.channel_properties["location"], [[16, 0], [0, 15], [0, 30], [16, 45]])
+    assert zarr.open_group(str(out), mode="r").attrs["source_metadata"]["source"] == str(src)
+
+
+def test_metadata_from_leaves_location_out_when_a_channel_has_no_contact(tmp_path):
+    traces = np.random.default_rng(0).integers(-100, 100, (100_000, N_CH), dtype=np.int16)
+    src = _si_zarr(tmp_path / "si.zarr", traces)
+    root = zarr.open_group(str(src), mode="r+")
+    del root["properties/location"]
+    root.attrs["probe"] = {"probes": [{"contact_positions": [[0.0, 0.0]] * 3, "device_channel_indices": [0, 1, 2]}]}
+    out = tmp_path / "out.zarr"
+    build_mipmap(
+        traces, out, sampling_frequency=30000.0, config=SMALL_CFG, encoding=LOSSLESS_ENCODING, metadata_from=str(src)
+    )
+
+    assert "location" not in open_mipmap(out).channel_properties
+
+
 def test_preprocessed_store_carries_probe_properties_and_chain(tmp_path):
     si = pytest.importorskip("spikeinterface.core")
     spre = pytest.importorskip("spikeinterface.preprocessing")

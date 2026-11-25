@@ -50,7 +50,7 @@ builder's choice and outside this contract: a reader takes them from array metad
 | `t_start` | float or null | Time of sample 0 in seconds on the acquisition clock; null means 0. Sample `i` is at `t_start + i / sampling_frequency`. |
 | `raw_source` | string or null | Set only in a pyramid-only store: the URI of the store holding raw samples. |
 | `raw_path` | string or null | The raw array's path inside `raw_source`; null means try `raw`, then `traces_seg0`. |
-| `source_metadata` | object or null | Copied from the source, for interpretation only: `probe` (probeinterface `ProbeGroup.to_dict`), `annotations`, `si_chain` (SpikeInterface preprocessing steps, source first). |
+| `source_metadata` | object or null | Copied from the source, for interpretation only: `probe` (probeinterface `ProbeGroup.to_dict`), `annotations`, `si_chain` (SpikeInterface preprocessing steps, source first), `source` (URI of the store the metadata was copied from). |
 | `channel_stats` | object | Optional. Per-channel display statistics; see below. |
 
 ## Channel statistics let a reader scale traces before reading samples
@@ -103,7 +103,8 @@ decode parameters, but a reader decodes each level by its own attributes rather 
 `/channel_ids` holds each channel's id as a string, the label to show beside channel `c`.
 `/properties/{name}` holds one SpikeInterface channel property per array, first axis by channel:
 numeric arrays as stored, string arrays as strings. `properties/location` is `(C, 2)` or `(C, 3)` probe
-coordinates in µm. ADC calibration properties (`gain_to_uV` and the like) are never stored here, since
+coordinates in µm; a builder SHOULD write it whenever the source locates its channels, including through the
+probe's contact positions alone. ADC calibration properties (`gain_to_uV` and the like) are never stored here, since
 the encodings already apply them.
 
 ## A pyramid-only store reads raw from another store
@@ -134,3 +135,4 @@ Additions within version 1, which a version 1 reader may ignore:
 |---|---|
 | 2026-11-23 | `channel_stats` root attribute. |
 | 2026-11-23 | `clipped_values` array attribute. |
+| 2026-11-25 | `source_metadata.source`; `properties/location` from the probe when the source has no location property. |

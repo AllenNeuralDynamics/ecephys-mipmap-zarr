@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 import zarr
 
 from ecephys_mipmap_zarr.metadata import LevelQuantization, RawQuantization
@@ -272,11 +273,36 @@ def _copy_source_arrays(src: zarr.Group, dst: zarr.Group) -> None:
         node = props_src[name]
         if isinstance(node, zarr.Array):
             properties[name] = np.asarray(node[:])
-    if "location" in properties:
-        properties["location"] = np.asarray(properties["location"], dtype=np.float64)
     if n_channels is None:
         n_channels = next((len(v) for v in properties.values() if np.ndim(v) > 0), 0)
+    if "location" not in properties:
+        location = _probe_channel_locations(src.attrs.get("probe"), n_channels)
+        if location is not None:
+            properties["location"] = location
+    if "location" in properties:
+        properties["location"] = np.asarray(properties["location"], dtype=np.float64)
     _write_channel_properties(dst, properties, n_channels)
+
+
+def _probe_channel_locations(probe: Any, n_channels: int) -> npt.NDArray[np.float64] | None:
+    """Each channel's contact position from probeinterface ``ProbeGroup.to_dict`` JSON, as SpikeInterface derives it.
+
+    An SI zarr without a ``location`` property still carries the probe; channel ``c`` is the contact whose
+    ``device_channel_indices`` entry is ``c``. None unless every channel has a contact.
+    """
+    probes = probe.get("probes") if isinstance(probe, dict) else None
+    if not probes or n_channels <= 0:
+        return None
+    location = np.full((n_channels, 2), np.nan)
+    for one in probes:
+        positions = np.asarray(one.get("contact_positions", []), dtype=np.float64)
+        wiring = one.get("device_channel_indices")
+        if wiring is None or positions.ndim != 2 or positions.shape[1] < 2 or len(wiring) != len(positions):
+            return None
+        for contact, channel in enumerate(wiring):
+            if 0 <= channel < n_channels:
+                location[channel] = positions[contact, :2]
+    return location if np.isfinite(location).all() else None
 
 
 def _read_gain_offset(src: zarr.Group) -> tuple[np.ndarray, np.ndarray] | None:

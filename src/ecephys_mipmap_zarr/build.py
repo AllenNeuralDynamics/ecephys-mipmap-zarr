@@ -199,7 +199,7 @@ def build_mipmap(
     attrs_source_metadata: dict[str, Any] | None = None
     t_start: float | None = None
     if meta_root is not None:
-        attrs_source_metadata = _extract_source_metadata(meta_root)
+        attrs_source_metadata = {**(_extract_source_metadata(meta_root) or {}), "source": str(metadata_from)}
         t_start = _extract_t_start(meta_root)
         _copy_source_arrays(meta_root, root)
 
