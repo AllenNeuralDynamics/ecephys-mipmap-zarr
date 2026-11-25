@@ -34,5 +34,6 @@ jobs:
       python-version: ${{ matrix.python-version }}
       package-name: ecephys_mipmap_zarr
       run-mypy: true
+      smoke-extras: "cli,viewer"
     secrets:
       repo-token: ${{ secrets.GITHUB_TOKEN }}
